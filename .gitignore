@@ -1,0 +1,11 @@
+# Bauergebnis — entsteht in Sekunden durch build.cmd, gehoert nicht ins Repo.
+# Darin liegen auch die Laufzeitordner logos\ und hintergruende\, die die
+# Anwendung selbst anlegt und in denen eigene Dateien des Nutzers liegen.
+bin/
+
+# Windows- und Editorkram
+Thumbs.db
+desktop.ini
+*.user
+*.suo
+.vs/

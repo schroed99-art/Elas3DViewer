@@ -1,0 +1,2284 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Diagnostics;
+using System.Runtime;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
+using System.Windows.Media.Imaging;
+using System.Windows.Media.Media3D;
+using System.Windows.Threading;
+
+namespace Elas3DView
+{
+    public class FileEntry
+    {
+        public string Name;
+        public string FullPath;
+        public bool IsImage;
+        public override string ToString() { return Name; }
+    }
+
+    public class MainWindow : Window
+    {
+        // ---- Szene -----------------------------------------------------
+        private Viewport3D _viewport;
+        private Grid _viewHost;
+        private Border _viewFrame;
+        private Model3DGroup _liveScene;
+        private GeometryModel3D _liveMesh;
+        private AmbientLight _ambient;
+        private DirectionalLight _key, _fill, _rim;
+        private Material _material, _backMaterial;
+
+        private LoadedModel _model;
+        private string _currentFile;     // ausgewählte Datei - Modell oder Bild
+        private string _modelFile;       // zuletzt geladenes 3D-Modell
+        private string _currentFolder;
+        private bool _showingImage;
+        private Image _imageView;
+        private int _kind;               // 0 = Modelle, 1 = Bilder, 2 = alles
+        private Button[] _kindBtns;
+        private Button _btnImageToggle;
+
+        // ---- Kamera ----------------------------------------------------
+        private const double FovDeg = 45.0;
+        private double _yaw = -55, _pitch = 28, _distance = 200, _fitDistance = 200;
+        private Point3D _target = new Point3D(0, 0, 0);
+        private bool _ortho;
+
+        private Point _dragStart;
+        private int _dragMode;            // 0 = keine, 1 = drehen, 2 = verschieben
+        private bool _rightDragged;
+
+        // ---- Oberfläche ------------------------------------------------
+        private ListBox _fileList;
+        private TextBlock _folderLabel, _countLabel, _statusFile, _statusInfo, _emptyHint;
+        private ComboBox _cbBackground, _cbFinish, _cbWidth, _cbJpgBg, _cbLogo;
+        private Slider _sldLogo;
+        private TextBlock _lblLogoSize;
+        private PositionPicker _logoPos;
+        private Image _logoImage;
+        private string _logoFile;
+        private double _logoPercent = 16;
+        private bool _suppressLogo;
+        private bool _suppressBg;
+        private bool _contrastAccepted;
+        private int _bgPreset;
+        private string _bgImage;
+        private ColorPickerButton _colorBtn;
+        private CheckBox _chkOrtho;
+        private Button _themeBtn;
+        private Border _busy, _scrim, _toast;
+        private TextBlock _busyText, _toastText;
+        private Button _busyCancel;
+        private ContextMenu _fileMenu, _viewMenu;
+        private DispatcherTimer _toastTimer;
+
+        private bool _suppressSelection;
+        private bool _busyActive;
+        private bool _cancelRequested;
+        private string _pendingFile;
+
+        private Color _modelColor = Color.FromRgb(0xB6, 0xBC, 0xC4);
+        private readonly List<FileEntry> _entries = new List<FileEntry>();
+
+        private static readonly string[] BackgroundNames =
+            { "Wie Design", "Hell", "Dunkel", "Weiß", "Blau", "Grau" };
+        private static readonly string[] FinishNames =
+            { "Matt", "Seidenmatt", "Glänzend", "Metallic" };
+        private static readonly string[] JpgBgNames =
+            { "Weiß", "Wie Ansicht", "Hell", "Dunkel", "Grau" };
+        private static readonly int[] WidthValues = { 1280, 1600, 1920, 2560, 3840 };
+
+        [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+        private static extern int StrCmpLogicalW(string a, string b);
+
+        public MainWindow()
+        {
+            Title = "Elas3DView";
+            Width = 1340;
+            Height = 860;
+            MinWidth = 980;
+            MinHeight = 600;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI");
+            AllowDrop = true;
+            SetResourceReference(BackgroundProperty, "Bg");
+
+            BuildUi();
+            HookCommands();
+
+            Drop += OnDrop;
+            DragOver += OnDragOver;
+            Loaded += OnLoaded;
+            SourceInitialized += delegate { Theme.ApplyTitleBar(this); };
+            Theme.Changed += delegate { OnThemeChanged(); };
+            Closing += delegate { SaveSettings(); };
+        }
+
+        public void QueueInitialFile(string path) { _pendingFile = path; }
+
+        // =================================================================
+        //  Aufbau der Oberfläche
+        // =================================================================
+
+        private void BuildUi()
+        {
+            Grid root = new Grid();
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Content = root;
+
+            root.Children.Add(BuildHeader());
+
+            Grid main = new Grid();
+            main.Margin = new Thickness(10, 0, 10, 0);
+            main.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(268) });
+            main.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            main.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            Grid.SetRow(main, 1);
+            root.Children.Add(main);
+
+            main.Children.Add(BuildFilePanel());
+
+            GridSplitter split = new GridSplitter();
+            split.Width = 8;
+            split.HorizontalAlignment = HorizontalAlignment.Stretch;
+            split.VerticalAlignment = VerticalAlignment.Stretch;
+            Grid.SetColumn(split, 1);
+            main.Children.Add(split);
+
+            Grid right = new Grid();
+            right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            right.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Grid.SetColumn(right, 2);
+            main.Children.Add(right);
+
+            right.Children.Add(BuildViewport());
+
+            UIElement bar = BuildViewBar();
+            Grid.SetRow(bar, 1);
+            right.Children.Add(bar);
+
+            UIElement status = BuildStatusBar();
+            Grid.SetRow(status, 2);
+            root.Children.Add(status);
+
+            // Überlagerungen über alles
+            _scrim = new Border();
+            _scrim.Visibility = Visibility.Collapsed;
+            _scrim.SetResourceReference(Border.BackgroundProperty, "ScrimBrush");
+            Grid.SetRowSpan(_scrim, 3);
+            root.Children.Add(_scrim);
+        }
+
+        private UIElement BuildHeader()
+        {
+            Border shell = Card();
+            shell.Margin = new Thickness(10, 10, 10, 8);
+            shell.Padding = new Thickness(14, 9, 14, 9);
+
+            DockPanel dp = new DockPanel();
+            shell.Child = dp;
+
+            TextBlock brand = new TextBlock();
+            brand.Text = "ELAS3DVIEW";
+            brand.FontSize = 13.5;
+            brand.FontWeight = FontWeights.SemiBold;
+            brand.VerticalAlignment = VerticalAlignment.Center;
+            brand.Margin = new Thickness(2, 0, 18, 0);
+            brand.SetResourceReference(TextBlock.ForegroundProperty, "Gold");
+            DockPanel.SetDock(brand, Dock.Left);
+            dp.Children.Add(brand);
+
+            _themeBtn = Chip("Helles Design", "Zwischen hellem und dunklem Design wechseln", OnToggleTheme);
+            _themeBtn.Margin = new Thickness(0);
+            DockPanel.SetDock(_themeBtn, Dock.Right);
+            dp.Children.Add(_themeBtn);
+
+            WrapPanel actions = new WrapPanel();
+            actions.VerticalAlignment = VerticalAlignment.Center;
+            actions.Children.Add(Primary("Öffnen …", "Modell öffnen (Strg+O)", OnOpenFile));
+            actions.Children.Add(Action("Ordner …", "Ordner öffnen (Strg+Umschalt+O)", OnOpenFolder));
+            actions.Children.Add(Gap());
+            actions.Children.Add(Action("JPG speichern", "Aktuelle Ansicht als JPG neben das Modell legen (Strg+S)", OnSaveJpg));
+            actions.Children.Add(Action("Alle als JPG …", "Für jede Datei im Ordner ein JPG erzeugen", OnBatchJpg));
+            actions.Children.Add(Gap());
+            actions.Children.Add(Action("Umbenennen", "Modelldatei umbenennen (F2)", OnRename));
+            Button del = Action("Löschen", "Modell und zugehöriges Bild in den Papierkorb (Entf)", OnDelete);
+            del.Style = (Style)Application.Current.Resources["BtnDanger"];
+            actions.Children.Add(del);
+            dp.Children.Add(actions);
+
+            return shell;
+        }
+
+        private UIElement BuildFilePanel()
+        {
+            Border shell = Card();
+            shell.Margin = new Thickness(0, 0, 0, 0);
+            shell.Padding = new Thickness(10, 10, 6, 10);
+
+            DockPanel dp = new DockPanel();
+            shell.Child = dp;
+
+            TextBlock head = new TextBlock();
+            head.Text = "DATEIEN";
+            head.FontSize = 10.5;
+            head.FontWeight = FontWeights.SemiBold;
+            head.Margin = new Thickness(4, 0, 0, 6);
+            head.SetResourceReference(TextBlock.ForegroundProperty, "GoldText");
+            DockPanel.SetDock(head, Dock.Top);
+            dp.Children.Add(head);
+
+            _folderLabel = new TextBlock();
+            _folderLabel.Text = "Kein Ordner gewählt";
+            _folderLabel.FontSize = 11.5;
+            _folderLabel.TextTrimming = TextTrimming.CharacterEllipsis;
+            _folderLabel.Margin = new Thickness(4, 0, 4, 9);
+            _folderLabel.SetResourceReference(TextBlock.ForegroundProperty, "TextMuted");
+            DockPanel.SetDock(_folderLabel, Dock.Top);
+            dp.Children.Add(_folderLabel);
+
+            // Umschalter: zeigt die Liste Modelle, Bilder oder beides?
+            WrapPanel kinds = new WrapPanel();
+            kinds.Margin = new Thickness(2, 0, 0, 8);
+            DockPanel.SetDock(kinds, Dock.Top);
+            string[] kindNames = { "Modelle", "Bilder", "Alle" };
+            string[] kindTips =
+            {
+                "Nur STL- und 3MF-Dateien zeigen",
+                "Nur Bilddateien des Ordners zeigen",
+                "Modelle und Bilder gemeinsam zeigen"
+            };
+            _kindBtns = new Button[3];
+            for (int i = 0; i < 3; i++)
+            {
+                int captured = i;
+                Button b = Chip(kindNames[i], kindTips[i], delegate { SetKind(captured); });
+                b.Margin = new Thickness(0, 0, 4, 0);
+                _kindBtns[i] = b;
+                kinds.Children.Add(b);
+            }
+            dp.Children.Add(kinds);
+
+            _countLabel = new TextBlock();
+            _countLabel.FontSize = 11;
+            _countLabel.Margin = new Thickness(4, 8, 0, 0);
+            _countLabel.SetResourceReference(TextBlock.ForegroundProperty, "TextMuted");
+            DockPanel.SetDock(_countLabel, Dock.Bottom);
+            dp.Children.Add(_countLabel);
+
+            _fileList = new ListBox();
+            _fileList.Style = (Style)Application.Current.Resources["List"];
+            _fileList.ItemContainerStyle = (Style)Application.Current.Resources["ListItem"];
+            _fileList.SelectionChanged += OnFileSelected;
+            _fileList.PreviewMouseRightButtonDown += OnListRightDown;
+            _fileMenu = BuildFileMenu();
+            _fileList.ContextMenu = _fileMenu;
+            dp.Children.Add(_fileList);
+
+            return shell;
+        }
+
+        private UIElement BuildViewport()
+        {
+            _viewFrame = Card();
+            _viewFrame.Margin = new Thickness(0, 0, 0, 8);
+            _viewFrame.Padding = new Thickness(0);
+
+            _viewHost = new Grid();
+            _viewHost.Focusable = true;
+            _viewFrame.Child = _viewHost;
+
+            // Ecken des 3D-Bereichs wirklich abrunden
+            _viewHost.SizeChanged += delegate
+            {
+                _viewHost.Clip = new RectangleGeometry(
+                    new Rect(0, 0, _viewHost.ActualWidth, _viewHost.ActualHeight), 13, 13);
+                UpdateCamera();
+                if (_logoImage != null && _logoImage.Visibility == Visibility.Visible)
+                    LayoutLogo(_logoImage, _viewHost.ActualWidth);
+            };
+
+            _viewport = new Viewport3D();
+            _viewport.IsHitTestVisible = false;   // sonst wird die Maus bei großen Netzen zäh
+            _viewHost.Children.Add(_viewport);
+
+            _emptyHint = new TextBlock();
+            _emptyHint.Text = "Modell öffnen  ·  oder STL-/3MF-Datei hierher ziehen";
+            _emptyHint.HorizontalAlignment = HorizontalAlignment.Center;
+            _emptyHint.VerticalAlignment = VerticalAlignment.Center;
+            _emptyHint.FontSize = 14;
+            _emptyHint.SetResourceReference(TextBlock.ForegroundProperty, "TextMuted");
+            _viewHost.Children.Add(_emptyHint);
+
+            // Bildansicht statt 3D — liegt an derselben Stelle, nur eines ist sichtbar.
+            _imageView = new Image();
+            _imageView.Stretch = Stretch.Uniform;
+            _imageView.StretchDirection = StretchDirection.Both;
+            _imageView.Margin = new Thickness(14);
+            _imageView.IsHitTestVisible = false;
+            _imageView.Visibility = Visibility.Collapsed;
+            RenderOptions.SetBitmapScalingMode(_imageView, BitmapScalingMode.HighQuality);
+            _viewHost.Children.Add(_imageView);
+
+            // Liegt über dem Modell, aber unter Hinweis und Meldung.
+            _logoImage = new Image();
+            _logoImage.IsHitTestVisible = false;
+            _logoImage.Visibility = Visibility.Collapsed;
+            RenderOptions.SetBitmapScalingMode(_logoImage, BitmapScalingMode.HighQuality);
+            _viewHost.Children.Add(_logoImage);
+
+            BuildBusyOverlay();
+            BuildToast();
+
+            _viewMenu = BuildViewMenu();
+
+            _viewHost.MouseLeftButtonDown += OnViewMouseDown;
+            _viewHost.MouseRightButtonDown += OnViewMouseDown;
+            _viewHost.MouseDown += OnViewMouseDown;
+            _viewHost.MouseMove += OnViewMouseMove;
+            _viewHost.MouseUp += OnViewMouseUp;
+            _viewHost.MouseWheel += OnViewMouseWheel;
+
+            InitScene();
+            return _viewFrame;
+        }
+
+        private UIElement BuildViewBar()
+        {
+            Border shell = Card();
+            shell.Margin = new Thickness(0, 0, 0, 8);
+            shell.Padding = new Thickness(10, 8, 10, 8);
+
+            StackPanel rows = new StackPanel();
+            shell.Child = rows;
+
+            WrapPanel wp = new WrapPanel();
+            rows.Children.Add(wp);
+
+            wp.Children.Add(Chip("Iso", "Isometrische Ansicht (1)", delegate { SetView(-55, 28); }));
+            wp.Children.Add(Chip("Vorne", "Vorderansicht (2)", delegate { SetView(-90, 0); }));
+            wp.Children.Add(Chip("Hinten", "Rückansicht (3)", delegate { SetView(90, 0); }));
+            wp.Children.Add(Chip("Links", "Ansicht von links (4)", delegate { SetView(180, 0); }));
+            wp.Children.Add(Chip("Rechts", "Ansicht von rechts (5)", delegate { SetView(0, 0); }));
+            wp.Children.Add(Chip("Oben", "Draufsicht (6)", delegate { SetView(-90, 89.5); }));
+            wp.Children.Add(Chip("Unten", "Untersicht (7)", delegate { SetView(-90, -89.5); }));
+            wp.Children.Add(Chip("Einpassen", "Modell einpassen (Leertaste)", delegate { FitToModel(true); UpdateCamera(); }));
+            wp.Children.Add(Gap());
+
+            _btnImageToggle = Chip("Bild zeigen",
+                "Zwischen dem Modell und seinem Vorschaubild wechseln (B)", ToggleImage);
+            wp.Children.Add(_btnImageToggle);
+            wp.Children.Add(Gap());
+
+            _chkOrtho = new CheckBox();
+            _chkOrtho.Content = "Orthogonal";
+            _chkOrtho.Style = (Style)Application.Current.Resources["Chk"];
+            _chkOrtho.Margin = new Thickness(2, 0, 12, 0);
+            _chkOrtho.ToolTip = "Parallelprojektion statt Perspektive";
+            _chkOrtho.Checked += delegate { SetProjection(true); };
+            _chkOrtho.Unchecked += delegate { SetProjection(false); };
+            wp.Children.Add(_chkOrtho);
+
+            wp.Children.Add(Gap());
+            _colorBtn = new ColorPickerButton("Modellfarbe");
+            _colorBtn.SelectedColor = _modelColor;
+            _colorBtn.ToolTip = "Farbe des Modells wählen";
+            _colorBtn.ColorChanged += delegate
+            {
+                _modelColor = _colorBtn.SelectedColor;
+                ApplyMaterial();
+            };
+            wp.Children.Add(Pair("Farbe", _colorBtn));
+
+            _cbFinish = Combo(FinishNames, 1, 116, delegate { ApplyMaterial(); });
+            wp.Children.Add(Pair("Oberfläche", _cbFinish));
+
+            _cbBackground = Combo(BackgroundNames, 0, 136, delegate
+            {
+                if (_suppressBg) return;
+                ImageEntry sel = _cbBackground.SelectedItem as ImageEntry;
+                _bgImage = sel == null ? null : Path.GetFileName(sel.FullPath);
+                if (sel == null) _bgPreset = _cbBackground.SelectedIndex;
+                _contrastAccepted = false;
+                ApplyBackground();
+            });
+            _cbBackground.ToolTip = "Fläche hinter dem Modell — Voreinstellung oder eigenes Bild";
+            wp.Children.Add(Pair("Hintergrund", _cbBackground));
+            wp.Children.Add(Chip("Hintergründe", "Ordner mit den Hintergrundbildern öffnen",
+                delegate { OpenFolder(ImageStore.Backgrounds); }));
+
+            // ---- zweite Reihe: alles, was das erzeugte Bild betrifft ----
+            WrapPanel wp2 = new WrapPanel();
+            wp2.Margin = new Thickness(0, 8, 0, 0);
+            rows.Children.Add(wp2);
+
+            string[] widthLabels = new string[WidthValues.Length];
+            for (int i = 0; i < WidthValues.Length; i++)
+                widthLabels[i] = WidthValues[i].ToString(CultureInfo.InvariantCulture) + " px";
+            _cbWidth = Combo(widthLabels, 2, 100, null);
+            _cbWidth.ToolTip = "Breite des erzeugten Bildes";
+            wp2.Children.Add(Pair("JPG", _cbWidth));
+
+            _cbJpgBg = Combo(JpgBgNames, 0, 112, delegate { _contrastAccepted = false; });
+            _cbJpgBg.ToolTip = "Hintergrund im gespeicherten JPG. Weiß ist das, was der Shop erwartet.";
+            wp2.Children.Add(Pair("Bildgrund", _cbJpgBg));
+
+            wp2.Children.Add(Gap());
+
+            _cbLogo = new ComboBox();
+            _cbLogo.Style = (Style)Application.Current.Resources["Combo"];
+            _cbLogo.ItemContainerStyle = (Style)Application.Current.Resources["ComboItem"];
+            _cbLogo.Width = 168;
+            _cbLogo.Margin = new Thickness(0, 0, 6, 0);
+            _cbLogo.ToolTip = "Logo, das im Bild und in der Ansicht liegt";
+            _cbLogo.SelectionChanged += delegate { _contrastAccepted = false; UpdateLogo(); };
+            wp2.Children.Add(Pair("Logo", _cbLogo));
+
+            _sldLogo = new Slider();
+            _sldLogo.Style = (Style)Application.Current.Resources["Sld"];
+            _sldLogo.Minimum = 4;
+            _sldLogo.Maximum = 45;
+            _sldLogo.Value = _logoPercent;
+            _sldLogo.Width = 116;
+            _sldLogo.Margin = new Thickness(0, 0, 6, 0);
+            _sldLogo.ToolTip = "Breite des Logos, gemessen an der Bildbreite";
+            _sldLogo.ValueChanged += delegate
+            {
+                _logoPercent = Math.Round(_sldLogo.Value);
+                _contrastAccepted = false;
+                UpdateLogo();
+            };
+
+            _lblLogoSize = new TextBlock();
+            _lblLogoSize.VerticalAlignment = VerticalAlignment.Center;
+            _lblLogoSize.Margin = new Thickness(0, 0, 6, 0);
+            _lblLogoSize.MinWidth = 34;
+            _lblLogoSize.FontFamily = new FontFamily(Theme.NumFont);
+            _lblLogoSize.FontSize = 13;
+            _lblLogoSize.SetResourceReference(TextBlock.ForegroundProperty, "GoldText");
+
+            StackPanel sizeGroup = new StackPanel();
+            sizeGroup.Orientation = Orientation.Horizontal;
+            sizeGroup.Margin = new Thickness(0, 0, 4, 0);
+            sizeGroup.Children.Add(Label("Größe"));
+            sizeGroup.Children.Add(_sldLogo);
+            sizeGroup.Children.Add(_lblLogoSize);
+            wp2.Children.Add(sizeGroup);
+
+            _logoPos = new PositionPicker();
+            _logoPos.Changed += delegate { _contrastAccepted = false; UpdateLogo(); };
+            wp2.Children.Add(Pair("Position", _logoPos));
+
+            wp2.Children.Add(Chip("Logos", "Ordner mit den Logos im Explorer öffnen",
+                delegate { OpenFolder(ImageStore.Logos); }));
+
+            return shell;
+        }
+
+
+        private void OpenFolder(ImageStore store)
+        {
+            try
+            {
+                store.EnsureFolder();
+                System.Diagnostics.Process.Start("explorer.exe", "\"" + store.FolderPath() + "\"");
+            }
+            catch (Exception ex)
+            {
+                AppDialog.Error(this, "Ordner", ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Liest beide Bildordner neu ein und behält die bisherige Auswahl bei — auch
+        /// dann, wenn eine Datei dazugekommen ist und sich die Reihenfolge verschiebt.
+        /// </summary>
+        private void RefreshImageFolders()
+        {
+            ImageStore.Logos.EnsureFolder();
+            ImageStore.Backgrounds.EnsureFolder();
+
+            _suppressLogo = true;
+            _cbLogo.Items.Clear();
+            _cbLogo.Items.Add("Kein Logo");
+            int select = 0;
+            List<ImageEntry> logos = ImageStore.Logos.List();
+            for (int i = 0; i < logos.Count; i++)
+            {
+                _cbLogo.Items.Add(logos[i]);
+                if (Same(logos[i].FullPath, _logoFile)) select = i + 1;
+            }
+            _cbLogo.SelectedIndex = select;
+            _suppressLogo = false;
+
+            _suppressBg = true;
+            _cbBackground.Items.Clear();
+            foreach (string s in BackgroundNames) _cbBackground.Items.Add(s);
+            int bgSelect = _bgPreset >= 0 && _bgPreset < BackgroundNames.Length ? _bgPreset : 0;
+            List<ImageEntry> backs = ImageStore.Backgrounds.List();
+            for (int i = 0; i < backs.Count; i++)
+            {
+                _cbBackground.Items.Add(backs[i]);
+                if (Same(backs[i].FullPath, _bgImage)) bgSelect = BackgroundNames.Length + i;
+            }
+            _cbBackground.SelectedIndex = bgSelect;
+            if (_cbBackground.SelectedItem as ImageEntry == null) _bgImage = null;
+            _suppressBg = false;
+
+            UpdateLogo();
+            ApplyBackground();
+        }
+
+        private static bool Same(string fullPath, string fileName)
+        {
+            return fileName != null &&
+                   string.Equals(Path.GetFileName(fullPath), fileName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Legt das Logo über die Ansicht. Größe und Rand hängen an der Breite der
+        /// Fläche, damit Bildschirm und erzeugtes JPG dasselbe zeigen.
+        /// </summary>
+        private void UpdateLogo()
+        {
+            if (_suppressLogo || _logoImage == null) return;
+
+            ImageEntry sel = _cbLogo == null ? null : _cbLogo.SelectedItem as ImageEntry;
+            _logoFile = sel == null ? null : Path.GetFileName(sel.FullPath);
+            if (_lblLogoSize != null)
+                _lblLogoSize.Text = ((int)_logoPercent).ToString(CultureInfo.CurrentCulture) + " %";
+
+            BitmapSource src = sel == null ? null : ImageStore.Load(sel.FullPath);
+            if (src == null)
+            {
+                _logoImage.Visibility = Visibility.Collapsed;
+                return;
+            }
+            _logoImage.Source = src;
+            _logoImage.Visibility = Visibility.Visible;
+            LayoutLogo(_logoImage, _viewHost.ActualWidth);
+        }
+
+        /// <summary>
+        /// Wo das Logo sitzt, in Anteilen der Fläche (0 bis 1) — dieselbe Rechnung wie
+        /// in LayoutLogo, nur ohne Bezug auf eine konkrete Größe.
+        /// </summary>
+        private Rect LogoRegion()
+        {
+            BitmapSource src = _logoImage == null ? null : _logoImage.Source as BitmapSource;
+            if (src == null || src.PixelWidth <= 0) return new Rect(0, 0, 1, 1);
+
+            double aspect = ViewAspect();
+            double lw = _logoPercent / 100.0;
+            double lh = lw * ((double)src.PixelHeight / src.PixelWidth) * aspect;
+            if (lh > 1) lh = 1;
+
+            const double padX = 0.028;
+            double padY = padX * aspect;
+
+            int p = _logoPos == null ? 8 : _logoPos.Index;
+            int col = p % 3, row = p / 3;
+            double x = col == 0 ? padX : col == 1 ? (1 - lw) / 2 : 1 - padX - lw;
+            double y = row == 0 ? padY : row == 1 ? (1 - lh) / 2 : 1 - padY - lh;
+            if (x < 0) x = 0;
+            if (y < 0) y = 0;
+            return new Rect(x, y, Math.Min(lw, 1 - x), Math.Min(lh, 1 - y));
+        }
+
+        /// <summary>
+        /// Wäre das Logo im gespeicherten Bild überhaupt zu sehen? Gemessen wird der
+        /// Grund genau an der Stelle, an der das Logo liegt.
+        /// </summary>
+        private bool LogoWouldVanish(out string detail)
+        {
+            detail = null;
+            if (_logoImage == null || _logoImage.Visibility != Visibility.Visible) return false;
+            BitmapSource src = _logoImage.Source as BitmapSource;
+            if (src == null) return false;
+
+            Contrast.Stats logo = Contrast.OfImage(src);
+            Contrast.Stats ground = Contrast.OfBrush(ExportBackground(1.0), ViewAspect(), LogoRegion());
+            if (!Contrast.WouldVanish(logo, ground)) return false;
+
+            detail = "Helligkeit des Logos " + Contrast.Percent(logo.Mean) +
+                     ", des Bildgrunds an dieser Stelle " + Contrast.Percent(ground.Mean) + ".";
+            return true;
+        }
+
+        /// <summary>Fragt einmal nach, solange sich an Logo und Grund nichts ändert.</summary>
+        private bool ContrastOkay()
+        {
+            if (_contrastAccepted) return true;
+            string detail;
+            if (!LogoWouldVanish(out detail)) return true;
+
+            bool go = AppDialog.Confirm(this, "Das Logo wäre nicht zu sehen",
+                "Das gewählte Logo ist nahezu einfarbig und hebt sich vom Bildgrund kaum ab.\n" +
+                detail + "\n\n" +
+                "Auf hellem Grund braucht es ein dunkles Logo, auf dunklem ein helles — " +
+                "oder den Bildgrund wechseln.",
+                "Trotzdem speichern", false);
+            if (go) _contrastAccepted = true;
+            return go;
+        }
+
+        /// <summary>Größe, Ausrichtung und Rand für eine gegebene Flächenbreite setzen.</summary>
+        private void LayoutLogo(Image img, double hostWidth)
+        {
+            if (hostWidth < 8) hostWidth = 8;
+            img.Width = hostWidth * _logoPercent / 100.0;
+            img.Stretch = Stretch.Uniform;
+
+            int p = _logoPos == null ? 8 : _logoPos.Index;
+            int col = p % 3, row = p / 3;
+            img.HorizontalAlignment = col == 0 ? HorizontalAlignment.Left
+                                    : col == 1 ? HorizontalAlignment.Center
+                                               : HorizontalAlignment.Right;
+            img.VerticalAlignment = row == 0 ? VerticalAlignment.Top
+                                  : row == 1 ? VerticalAlignment.Center
+                                             : VerticalAlignment.Bottom;
+
+            double pad = hostWidth * 0.028;
+            img.Margin = new Thickness(
+                col == 0 ? pad : 0, row == 0 ? pad : 0,
+                col == 2 ? pad : 0, row == 2 ? pad : 0);
+        }
+
+        private UIElement BuildStatusBar()
+        {
+            Border shell = new Border();
+            shell.Padding = new Thickness(22, 6, 22, 10);
+
+            StackPanel sp = new StackPanel();
+            sp.Orientation = Orientation.Horizontal;
+            shell.Child = sp;
+
+            _statusFile = new TextBlock();
+            _statusFile.FontSize = 12;
+            _statusFile.FontWeight = FontWeights.SemiBold;
+            _statusFile.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+            sp.Children.Add(_statusFile);
+
+            _statusInfo = new TextBlock();
+            _statusInfo.FontSize = 12;
+            _statusInfo.Margin = new Thickness(14, 0, 0, 0);
+            _statusInfo.FontFamily = new FontFamily(Theme.NumFont);
+            _statusInfo.FontSize = 13;
+            _statusInfo.SetResourceReference(TextBlock.ForegroundProperty, "TextMuted");
+            sp.Children.Add(_statusInfo);
+
+            return shell;
+        }
+
+        private void BuildBusyOverlay()
+        {
+            _busy = new Border();
+            _busy.CornerRadius = new CornerRadius(13);
+            _busy.Padding = new Thickness(24, 18, 24, 18);
+            _busy.HorizontalAlignment = HorizontalAlignment.Center;
+            _busy.VerticalAlignment = VerticalAlignment.Center;
+            _busy.Visibility = Visibility.Collapsed;
+            _busy.SetResourceReference(Border.BackgroundProperty, "Elevated");
+            _busy.SetResourceReference(Border.BorderBrushProperty, "Border");
+            _busy.BorderThickness = new Thickness(1);
+
+            StackPanel sp = new StackPanel();
+            _busyText = new TextBlock();
+            _busyText.FontSize = 13.5;
+            _busyText.HorizontalAlignment = HorizontalAlignment.Center;
+            _busyText.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+            sp.Children.Add(_busyText);
+
+            _busyCancel = new Button();
+            _busyCancel.Content = "Abbrechen";
+            _busyCancel.Style = (Style)Application.Current.Resources["Btn"];
+            _busyCancel.Margin = new Thickness(0, 13, 0, 0);
+            _busyCancel.HorizontalAlignment = HorizontalAlignment.Center;
+            _busyCancel.Visibility = Visibility.Collapsed;
+            _busyCancel.Click += delegate { _cancelRequested = true; };
+            sp.Children.Add(_busyCancel);
+
+            _busy.Child = sp;
+            _viewHost.Children.Add(_busy);
+        }
+
+        /// <summary>Kurz eingeblendetes Popup für Erfolgsmeldungen — sichtbar, aber nicht blockierend.</summary>
+        private void BuildToast()
+        {
+            _toast = new Border();
+            _toast.CornerRadius = new CornerRadius(11);
+            _toast.Padding = new Thickness(18, 11, 18, 11);
+            _toast.Margin = new Thickness(0, 0, 0, 22);
+            _toast.HorizontalAlignment = HorizontalAlignment.Center;
+            _toast.VerticalAlignment = VerticalAlignment.Bottom;
+            _toast.Visibility = Visibility.Collapsed;
+            _toast.SetResourceReference(Border.BackgroundProperty, "Elevated");
+            _toast.SetResourceReference(Border.BorderBrushProperty, "Border");
+            _toast.BorderThickness = new Thickness(1);
+
+            _toastText = new TextBlock();
+            _toastText.FontSize = 12.5;
+            _toast.Child = _toastText;
+            _viewHost.Children.Add(_toast);
+
+            _toastTimer = new DispatcherTimer();
+            _toastTimer.Interval = TimeSpan.FromMilliseconds(2200);
+            _toastTimer.Tick += delegate
+            {
+                _toastTimer.Stop();
+                DoubleAnimation fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(280));
+                fade.Completed += delegate { _toast.Visibility = Visibility.Collapsed; };
+                _toast.BeginAnimation(OpacityProperty, fade);
+            };
+        }
+
+        private void Toast(string text, bool good)
+        {
+            _toastText.Text = (good ? "✔  " : "⚠  ") + text;
+            _toastText.SetResourceReference(TextBlock.ForegroundProperty, good ? "Positive" : "Negative");
+            _toast.BeginAnimation(OpacityProperty, null);
+            _toast.Opacity = 1;
+            _toast.Visibility = Visibility.Visible;
+            _toastTimer.Stop();
+            _toastTimer.Start();
+        }
+
+        public void SetScrim(bool on)
+        {
+            if (_scrim != null) _scrim.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        // -------------------------------------------------- kleine Bausteine
+
+        private static Border Card()
+        {
+            Border b = new Border();
+            b.CornerRadius = new CornerRadius(14);
+            b.BorderThickness = new Thickness(1);
+            b.SetResourceReference(Border.BackgroundProperty, "Panel");
+            b.SetResourceReference(Border.BorderBrushProperty, "Border");
+            return b;
+        }
+
+        private static Button Styled(string key, string text, string tip, RoutedEventHandler h)
+        {
+            Button b = new Button();
+            b.Content = text;
+            b.ToolTip = tip;
+            b.Style = (Style)Application.Current.Resources[key];
+            b.Click += h;
+            return b;
+        }
+
+        private static Button Action(string t, string tip, RoutedEventHandler h) { return Styled("Btn", t, tip, h); }
+        private static Button Primary(string t, string tip, RoutedEventHandler h) { return Styled("BtnPrimary", t, tip, h); }
+        private static Button Chip(string t, string tip, RoutedEventHandler h) { return Styled("BtnChip", t, tip, h); }
+
+        private static UIElement Gap()
+        {
+            Border b = new Border();
+            b.Width = 1;
+            b.Height = 18;
+            b.Margin = new Thickness(5, 0, 11, 0);
+            b.VerticalAlignment = VerticalAlignment.Center;
+            b.SetResourceReference(Border.BackgroundProperty, "Border");
+            return b;
+        }
+
+        /// <summary>Beschriftung und Bedienelement bleiben beim Umbruch beieinander.</summary>
+        private static UIElement Pair(string caption, UIElement control)
+        {
+            StackPanel sp = new StackPanel();
+            sp.Orientation = Orientation.Horizontal;
+            sp.Margin = new Thickness(0, 0, 4, 0);
+            sp.Children.Add(Label(caption));
+            sp.Children.Add(control);
+            return sp;
+        }
+
+        private static TextBlock Label(string text)
+        {
+            TextBlock t = new TextBlock();
+            t.Text = text;
+            t.FontSize = 11.5;
+            t.VerticalAlignment = VerticalAlignment.Center;
+            t.Margin = new Thickness(4, 0, 6, 0);
+            t.SetResourceReference(TextBlock.ForegroundProperty, "TextMuted");
+            return t;
+        }
+
+        private static ComboBox Combo(string[] items, int selected, double width, SelectionChangedEventHandler h)
+        {
+            ComboBox cb = new ComboBox();
+            cb.Style = (Style)Application.Current.Resources["Combo"];
+            cb.ItemContainerStyle = (Style)Application.Current.Resources["ComboItem"];
+            cb.Width = width;
+            cb.Margin = new Thickness(0, 0, 6, 0);
+            foreach (string s in items) cb.Items.Add(s);
+            cb.SelectedIndex = selected;
+            if (h != null) cb.SelectionChanged += h;
+            return cb;
+        }
+
+        // =================================================================
+        //  Kontextmenüs
+        // =================================================================
+
+        private MenuItem Item(string header, string gesture, RoutedEventHandler h)
+        {
+            MenuItem mi = new MenuItem();
+            mi.Header = header;
+            if (gesture != null) mi.InputGestureText = gesture;
+            mi.Click += h;
+            return mi;
+        }
+
+        private ContextMenu BuildFileMenu()
+        {
+            ContextMenu cm = new ContextMenu();
+            cm.Items.Add(Item("JPG speichern", "Strg+S", OnSaveJpg));
+            cm.Items.Add(Item("Bild / Modell", "B", ToggleImage));
+            cm.Items.Add(Item("Umbenennen", "F2", OnRename));
+            cm.Items.Add(new Separator());
+            cm.Items.Add(Item("Im Explorer zeigen", null, OnShowInExplorer));
+            cm.Items.Add(new Separator());
+            cm.Items.Add(Item("Löschen", "Entf", OnDelete));
+            return cm;
+        }
+
+        private ContextMenu BuildViewMenu()
+        {
+            ContextMenu cm = new ContextMenu();
+            cm.Items.Add(Item("JPG speichern", "Strg+S", OnSaveJpg));
+            cm.Items.Add(Item("Umbenennen", "F2", OnRename));
+            cm.Items.Add(new Separator());
+            cm.Items.Add(Item("Bild / Modell", "B", ToggleImage));
+            cm.Items.Add(Item("Einpassen", "Leertaste", delegate { FitToModel(true); UpdateCamera(); }));
+            cm.Items.Add(Item("Im Explorer zeigen", null, OnShowInExplorer));
+            cm.Items.Add(new Separator());
+            cm.Items.Add(Item("Löschen", "Entf", OnDelete));
+            return cm;
+        }
+
+        /// <summary>Rechtsklick in der Liste wählt zuerst den getroffenen Eintrag aus.</summary>
+        private void OnListRightDown(object sender, MouseButtonEventArgs e)
+        {
+            DependencyObject d = e.OriginalSource as DependencyObject;
+            while (d != null && !(d is ListBoxItem) && !(d is ListBox))
+                d = VisualTreeHelper.GetParent(d);
+            ListBoxItem item = d as ListBoxItem;
+            if (item != null) item.IsSelected = true;
+        }
+
+        private void OnShowInExplorer(object sender, RoutedEventArgs e)
+        {
+            string path = _currentFile;
+            try
+            {
+                if (path != null && File.Exists(path))
+                    System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + path + "\"");
+                else if (_currentFolder != null && Directory.Exists(_currentFolder))
+                    System.Diagnostics.Process.Start("explorer.exe", "\"" + _currentFolder + "\"");
+            }
+            catch (Exception ex)
+            {
+                AppDialog.Error(this, "Explorer", "Der Explorer ließ sich nicht öffnen:\n\n" + ex.Message);
+            }
+        }
+
+        private void HookCommands()
+        {
+            AddBinding(Key.O, ModifierKeys.Control, OnOpenFile);
+            AddBinding(Key.O, ModifierKeys.Control | ModifierKeys.Shift, OnOpenFolder);
+            AddBinding(Key.S, ModifierKeys.Control, OnSaveJpg);
+            AddBinding(Key.F2, ModifierKeys.None, OnRename);
+            AddBinding(Key.Delete, ModifierKeys.None, OnDelete);
+            AddBinding(Key.F5, ModifierKeys.None, delegate { RefreshFolder(_currentFile); RefreshImageFolders(); });
+            AddBinding(Key.B, ModifierKeys.None, ToggleImage);
+            AddBinding(Key.Space, ModifierKeys.None, delegate { FitToModel(true); UpdateCamera(); });
+            AddBinding(Key.D1, ModifierKeys.None, delegate { SetView(-55, 28); });
+            AddBinding(Key.D2, ModifierKeys.None, delegate { SetView(-90, 0); });
+            AddBinding(Key.D3, ModifierKeys.None, delegate { SetView(90, 0); });
+            AddBinding(Key.D4, ModifierKeys.None, delegate { SetView(180, 0); });
+            AddBinding(Key.D5, ModifierKeys.None, delegate { SetView(0, 0); });
+            AddBinding(Key.D6, ModifierKeys.None, delegate { SetView(-90, 89.5); });
+            AddBinding(Key.D7, ModifierKeys.None, delegate { SetView(-90, -89.5); });
+            AddBinding(Key.PageDown, ModifierKeys.None, delegate { StepFile(1); });
+            AddBinding(Key.PageUp, ModifierKeys.None, delegate { StepFile(-1); });
+        }
+
+        private void AddBinding(Key key, ModifierKeys mods, RoutedEventHandler action)
+        {
+            RoutedCommand cmd = new RoutedCommand();
+            CommandBindings.Add(new CommandBinding(cmd, delegate(object s, ExecutedRoutedEventArgs e)
+            {
+                action(this, new RoutedEventArgs());
+                e.Handled = true;
+            }));
+
+            // Key und Modifiers einzeln setzen: der KeyBinding-Konstruktor wuerde
+            // Gesten ohne Modifikator (etwa "1" oder Leertaste) ablehnen.
+            KeyBinding kb = new KeyBinding();
+            kb.Command = cmd;
+            kb.Key = key;
+            kb.Modifiers = mods;
+            InputBindings.Add(kb);
+        }
+
+        // =================================================================
+        //  Design
+        // =================================================================
+
+        private void OnToggleTheme(object sender, RoutedEventArgs e)
+        {
+            Theme.Apply(!Theme.IsDark);
+        }
+
+        private void OnThemeChanged()
+        {
+            // Beschriftet ist, wohin der Klick führt, nicht wo man gerade steht.
+            _themeBtn.Content = Theme.IsDark ? "Helles Design" : "Dunkles Design";
+            Theme.ApplyTitleBar(this);
+            ApplyBackground();
+        }
+
+        // =================================================================
+        //  Szene und Kamera
+        // =================================================================
+
+        private void InitScene()
+        {
+            _liveScene = new Model3DGroup();
+
+            _ambient = new AmbientLight(Color.FromRgb(0x36, 0x38, 0x3C));
+            _key = new DirectionalLight(Color.FromRgb(0xD4, 0xD4, 0xD2), new Vector3D(0, 0, -1));
+            _fill = new DirectionalLight(Color.FromRgb(0x51, 0x56, 0x5E), new Vector3D(0, 0, -1));
+            _rim = new DirectionalLight(Color.FromRgb(0x2A, 0x2C, 0x31), new Vector3D(0, 0, 1));
+
+            _liveScene.Children.Add(_ambient);
+            _liveScene.Children.Add(_key);
+            _liveScene.Children.Add(_fill);
+            _liveScene.Children.Add(_rim);
+
+            ModelVisual3D visual = new ModelVisual3D();
+            visual.Content = _liveScene;
+            _viewport.Children.Add(visual);
+
+            ApplyMaterialObjects();
+            RebuildCamera();
+        }
+
+        private void ApplyMaterialObjects()
+        {
+            Color c = _modelColor;
+            int finish = _cbFinish == null ? 1 : Math.Max(0, _cbFinish.SelectedIndex);
+
+            byte specLevel;
+            double power;
+            double diffuseScale = 1.0;
+            switch (finish)
+            {
+                case 0: specLevel = 0x10; power = 6; break;             // Matt
+                case 2: specLevel = 0x8C; power = 52; break;            // Glänzend
+                case 3: specLevel = 0xB4; power = 34; diffuseScale = 0.68; break;  // Metallic
+                default: specLevel = 0x40; power = 20; break;           // Seidenmatt
+            }
+
+            SolidColorBrush diffuse = new SolidColorBrush(Scale(c, diffuseScale));
+            diffuse.Freeze();
+            SolidColorBrush spec = new SolidColorBrush(Color.FromRgb(specLevel, specLevel, specLevel));
+            spec.Freeze();
+            SolidColorBrush back = new SolidColorBrush(Scale(c, 0.42));
+            back.Freeze();
+
+            MaterialGroup mg = new MaterialGroup();
+            mg.Children.Add(new DiffuseMaterial(diffuse));
+            if (specLevel > 0x18) mg.Children.Add(new SpecularMaterial(spec, power));
+            mg.Freeze();
+            _material = mg;
+
+            DiffuseMaterial bm = new DiffuseMaterial(back);
+            bm.Freeze();
+            _backMaterial = bm;
+        }
+
+        private static Color Scale(Color c, double f)
+        {
+            return Color.FromRgb(
+                (byte)Math.Max(0, Math.Min(255, c.R * f)),
+                (byte)Math.Max(0, Math.Min(255, c.G * f)),
+                (byte)Math.Max(0, Math.Min(255, c.B * f)));
+        }
+
+        private void ApplyMaterial()
+        {
+            ApplyMaterialObjects();
+            if (_liveMesh != null && _model != null)
+            {
+                _liveScene.Children.Remove(_liveMesh);
+                _liveMesh = NewMeshModel();
+                _liveScene.Children.Add(_liveMesh);
+            }
+        }
+
+        private GeometryModel3D NewMeshModel()
+        {
+            GeometryModel3D g = new GeometryModel3D(_model.Mesh, _material);
+            g.BackMaterial = _backMaterial;
+            if (g.CanFreeze) g.Freeze();
+            return g;
+        }
+
+        /// <summary>Blickrichtung wechseln und dabei den eingestellten Zoomgrad beibehalten.</summary>
+        private void SetView(double yaw, double pitch)
+        {
+            double ratio = ZoomRatio();
+            _yaw = yaw;
+            _pitch = pitch;
+            if (_model != null)
+            {
+                FitToModel(false);
+                _distance = _fitDistance * ratio;
+            }
+            UpdateCamera();
+        }
+
+        private void SetProjection(bool ortho)
+        {
+            double ratio = ZoomRatio();
+            _ortho = ortho;
+            if (_model != null)
+            {
+                FitToModel(false);
+                _distance = _fitDistance * ratio;
+            }
+            RebuildCamera();
+        }
+
+        private double ZoomRatio()
+        {
+            if (_fitDistance < 1e-9) return 1.0;
+            double r = _distance / _fitDistance;
+            return r < 0.02 ? 0.02 : (r > 50 ? 50 : r);
+        }
+
+        private Vector3D CameraDirection()
+        {
+            double y = _yaw * Math.PI / 180.0;
+            double p = _pitch * Math.PI / 180.0;
+            return new Vector3D(Math.Cos(p) * Math.Cos(y), Math.Cos(p) * Math.Sin(y), Math.Sin(p));
+        }
+
+        private void RebuildCamera()
+        {
+            if (_ortho) _viewport.Camera = new OrthographicCamera();
+            else
+            {
+                PerspectiveCamera pc = new PerspectiveCamera();
+                pc.FieldOfView = FovDeg;
+                _viewport.Camera = pc;
+            }
+            UpdateCamera();
+        }
+
+        private void UpdateCamera()
+        {
+            if (_viewport == null || _viewport.Camera == null) return;
+            if (_pitch > 89.5) _pitch = 89.5;
+            if (_pitch < -89.5) _pitch = -89.5;
+
+            Vector3D dir = CameraDirection();
+            Point3D pos = _target + dir * _distance;
+            Vector3D look = -dir;
+            Vector3D up = new Vector3D(0, 0, 1);
+
+            double radius = _model != null ? _model.Radius : 100.0;
+            double near = Math.Max(0.01, Math.Min(_distance * 0.02, radius * 0.05));
+            double far = _distance + radius * 6.0 + 100.0;
+
+            PerspectiveCamera pc = _viewport.Camera as PerspectiveCamera;
+            if (pc != null)
+            {
+                pc.Position = pos;
+                pc.LookDirection = look;
+                pc.UpDirection = up;
+                pc.NearPlaneDistance = near;
+                pc.FarPlaneDistance = far;
+            }
+            OrthographicCamera oc = _viewport.Camera as OrthographicCamera;
+            if (oc != null)
+            {
+                oc.Position = pos;
+                oc.LookDirection = look;
+                oc.UpDirection = up;
+                oc.Width = OrthoWidth();
+                oc.NearPlaneDistance = -radius * 4 - 10;
+                oc.FarPlaneDistance = far;
+            }
+
+            UpdateLights(look, up);
+        }
+
+        private double OrthoWidth()
+        {
+            return 2.0 * _distance * Math.Tan(FovDeg * Math.PI / 360.0);
+        }
+
+        private void UpdateLights(Vector3D look, Vector3D worldUp)
+        {
+            Vector3D right = Vector3D.CrossProduct(look, worldUp);
+            if (right.Length < 1e-6) right = new Vector3D(1, 0, 0);
+            right.Normalize();
+            Vector3D up = Vector3D.CrossProduct(right, look);
+            up.Normalize();
+
+            _key.Direction = Norm(look + right * 0.42 - up * 0.55);
+            _fill.Direction = Norm(look - right * 0.75 + up * 0.25);
+            _rim.Direction = Norm(-look - up * 0.3);
+        }
+
+        private static Vector3D Norm(Vector3D v)
+        {
+            double l = v.Length;
+            if (l < 1e-9) return new Vector3D(0, 0, -1);
+            return v / l;
+        }
+
+        /// <summary>
+        /// Passt das Modell formatfüllend ein. Gerechnet wird über die acht Ecken der
+        /// Bounding-Box, nicht über eine Hüllkugel – flache oder längliche Teile füllen
+        /// den Rahmen damit deutlich besser aus.
+        /// </summary>
+        private void FitToModel(bool resetTarget)
+        {
+            if (_model == null) return;
+            if (resetTarget) _target = _model.Center;
+
+            double aspect = ViewAspect();
+            double tanH = Math.Tan(FovDeg * Math.PI / 360.0);
+            double tanV = tanH / Math.Max(0.05, aspect);
+
+            Vector3D dir = CameraDirection();
+            Vector3D look = -dir;
+            Vector3D right = Vector3D.CrossProduct(look, new Vector3D(0, 0, 1));
+            if (right.Length < 1e-6) right = new Vector3D(1, 0, 0);
+            right.Normalize();
+            Vector3D up = Vector3D.CrossProduct(right, look);
+            up.Normalize();
+
+            Point3D mn = _model.Min, mx = _model.Max;
+            double need = 0, maxU = 0, maxV = 0;
+            for (int i = 0; i < 8; i++)
+            {
+                Point3D corner = new Point3D(
+                    (i & 1) == 0 ? mn.X : mx.X,
+                    (i & 2) == 0 ? mn.Y : mx.Y,
+                    (i & 4) == 0 ? mn.Z : mx.Z);
+                Vector3D rel = corner - _target;
+                double u = Math.Abs(Vector3D.DotProduct(rel, right));
+                double v = Math.Abs(Vector3D.DotProduct(rel, up));
+                double w = Vector3D.DotProduct(rel, dir);
+                if (u > maxU) maxU = u;
+                if (v > maxV) maxV = v;
+                need = Math.Max(need, Math.Max(u / tanH, v / tanV) + w);
+            }
+
+            if (_ortho)
+            {
+                double widthNeeded = 2.0 * Math.Max(maxU, maxV * Math.Max(0.05, aspect)) * 1.06;
+                _distance = widthNeeded / (2.0 * tanH);
+            }
+            else _distance = need * 1.06;
+
+            if (_distance < _model.Radius * 0.02) _distance = _model.Radius * 0.02;
+            _fitDistance = _distance;
+        }
+
+        private double ViewAspect()
+        {
+            double w = _viewHost.ActualWidth, h = _viewHost.ActualHeight;
+            if (w < 4 || h < 4) return 4.0 / 3.0;
+            return w / h;
+        }
+
+        // =================================================================
+        //  Maussteuerung
+        // =================================================================
+
+        private void OnViewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            if (_busyActive) return;
+            int mode = 0;
+            if (e.ChangedButton == MouseButton.Left) mode = 1;
+            else if (e.ChangedButton == MouseButton.Right || e.ChangedButton == MouseButton.Middle) mode = 2;
+            if (mode == 0) return;
+
+            if (e.ChangedButton == MouseButton.Right) _rightDragged = false;
+            _dragMode = mode;
+            _dragStart = e.GetPosition(_viewHost);
+            _viewHost.CaptureMouse();
+            _viewHost.Focus();
+            e.Handled = true;
+        }
+
+        private void OnViewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (_dragMode == 0 || _model == null) return;
+            Point p = e.GetPosition(_viewHost);
+            double dx = p.X - _dragStart.X;
+            double dy = p.Y - _dragStart.Y;
+            if (Math.Abs(dx) + Math.Abs(dy) > 3) _rightDragged = true;
+            _dragStart = p;
+
+            if (_dragMode == 1)
+            {
+                _yaw -= dx * 0.35;
+                _pitch += dy * 0.35;
+            }
+            else
+            {
+                Vector3D dir = CameraDirection();
+                Vector3D look = -dir;
+                Vector3D right = Vector3D.CrossProduct(look, new Vector3D(0, 0, 1));
+                if (right.Length < 1e-6) right = new Vector3D(1, 0, 0);
+                right.Normalize();
+                Vector3D up = Vector3D.CrossProduct(right, look);
+                up.Normalize();
+
+                double h = Math.Max(4.0, _viewHost.ActualHeight);
+                double worldPerPixel = _ortho
+                    ? OrthoWidth() / Math.Max(4.0, _viewHost.ActualWidth)
+                    : 2.0 * _distance * Math.Tan(FovDeg * Math.PI / 360.0) / h;
+                _target += right * (-dx * worldPerPixel) + up * (dy * worldPerPixel);
+            }
+            UpdateCamera();
+        }
+
+        private void OnViewMouseUp(object sender, MouseButtonEventArgs e)
+        {
+            if (_dragMode == 0) return;
+            _dragMode = 0;
+            _viewHost.ReleaseMouseCapture();
+
+            // Rechtsklick ohne Ziehen öffnet das Kontextmenü statt zu verschieben.
+            if (e.ChangedButton == MouseButton.Right && !_rightDragged && !_busyActive)
+            {
+                _viewMenu.PlacementTarget = _viewHost;
+                _viewMenu.Placement = PlacementMode.MousePoint;
+                _viewMenu.IsOpen = true;
+            }
+            e.Handled = true;
+        }
+
+        private void OnViewMouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (_model == null) return;
+            double factor = Math.Pow(0.88, e.Delta / 120.0);
+            double r = _model.Radius;
+            _distance = Math.Max(r * 0.05, Math.Min(r * 200.0, _distance * factor));
+            UpdateCamera();
+            e.Handled = true;
+        }
+
+        // =================================================================
+        //  Hintergrund
+        // =================================================================
+
+        /// <param name="scale">
+        /// Verhältnis von Bildbreite zu Ansichtsbreite. Nur die Schraffur hängt daran:
+        /// sie ist fest gekachelt und muss beim Rendern in ein großes Bild mitwachsen,
+        /// sonst käme sie dort viel feiner heraus als auf dem Bildschirm.
+        /// </param>
+        private Brush ViewBackground(double scale)
+        {
+            ImageEntry img = _cbBackground == null ? null : _cbBackground.SelectedItem as ImageEntry;
+            if (img != null)
+            {
+                BitmapSource src = ImageStore.Load(img.FullPath);
+                if (src != null)
+                {
+                    ImageBrush ib = new ImageBrush(src);
+                    ib.Stretch = Stretch.UniformToFill;   // füllt den Rahmen, ohne zu verzerren
+                    ib.Freeze();
+                    return ib;
+                }
+            }
+            return PresetBrush(_cbBackground == null ? 0 : _cbBackground.SelectedIndex, scale);
+        }
+
+        /// <summary>
+        /// Grund für das erzeugte JPG. Voreingestellt Weiß: „Weiß ist das, was ein
+        /// Produktbild braucht — der Shop zeigt es auf hellen Flächen, Marktplätze
+        /// erwarten es so" (elasprintflow-oberflaeche-medien). „Wie Ansicht" nimmt
+        /// stattdessen genau das mit, was hinter dem Modell zu sehen ist.
+        /// </summary>
+        private Brush ExportBackground(double scale)
+        {
+            switch (_cbJpgBg == null ? 0 : _cbJpgBg.SelectedIndex)
+            {
+                case 1: return ViewBackground(scale);
+                case 2: return PresetBrush(1, scale);
+                case 3: return PresetBrush(2, scale);
+                case 4: return PresetBrush(5, scale);
+                default:
+                    SolidColorBrush w = new SolidColorBrush(Colors.White);
+                    w.Freeze();
+                    return w;
+            }
+        }
+
+        private Brush PresetBrush(int index, double scale)
+        {
+            Brush b;
+            switch (index)
+            {
+                case 1: b = VerticalGradient(Color.FromRgb(0xFF, 0xFF, 0xFF), Color.FromRgb(0xD5, 0xDD, 0xE6)); break;
+                case 2: b = VerticalGradient(Color.FromRgb(0x3B, 0x42, 0x4C), Color.FromRgb(0x14, 0x17, 0x1C)); break;
+                case 3: b = new SolidColorBrush(Colors.White); break;
+                case 4: b = VerticalGradient(Color.FromRgb(0x33, 0x66, 0x8E), Color.FromRgb(0x0F, 0x1D, 0x2B)); break;
+                case 5: b = new SolidColorBrush(Color.FromRgb(0xBF, 0xC4, 0xCA)); break;
+                default: return Theme.PreviewBrush(scale);
+            }
+            b.Freeze();
+            return b;
+        }
+
+        private static LinearGradientBrush VerticalGradient(Color top, Color bottom)
+        {
+            LinearGradientBrush g = new LinearGradientBrush();
+            g.StartPoint = new Point(0, 0);
+            g.EndPoint = new Point(0, 1);
+            g.GradientStops.Add(new GradientStop(top, 0));
+            g.GradientStops.Add(new GradientStop(bottom, 1));
+            return g;
+        }
+
+        private void ApplyBackground()
+        {
+            if (_viewHost != null) _viewHost.Background = ViewBackground(1.0);
+        }
+
+        // =================================================================
+        //  Laden
+        // =================================================================
+
+        private async void OnLoaded(object sender, RoutedEventArgs e)
+        {
+            LoadSettings();
+            OnThemeChanged();
+            ApplyMaterial();
+            RefreshImageFolders();
+            SetKind(_kind);
+            if (_pendingFile != null && File.Exists(_pendingFile))
+            {
+                string f = _pendingFile;
+                _pendingFile = null;
+                RefreshFolder(f);
+                await LoadFile(f);
+            }
+            else if (_currentFolder != null && Directory.Exists(_currentFolder))
+            {
+                RefreshFolder(null);
+            }
+        }
+
+        private void OnDragOver(object sender, DragEventArgs e)
+        {
+            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        private async void OnDrop(object sender, DragEventArgs e)
+        {
+            if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+            string[] paths = (string[])e.Data.GetData(DataFormats.FileDrop);
+            if (paths == null || paths.Length == 0) return;
+
+            string p = paths[0];
+            if (Directory.Exists(p))
+            {
+                _currentFolder = p;
+                RefreshFolder(null);
+                return;
+            }
+            if (!MeshLoader.IsSupported(p))
+            {
+                AppDialog.Warn(this, "Format nicht unterstützt",
+                    "Diese Datei kann nicht angezeigt werden:\n\n" + Path.GetFileName(p) +
+                    "\n\nMöglich sind STL- und 3MF-Dateien.");
+                return;
+            }
+            RefreshFolder(p);
+            await LoadFile(p);
+        }
+
+        private async void OnOpenFile(object sender, RoutedEventArgs e)
+        {
+            Microsoft.Win32.OpenFileDialog dlg = new Microsoft.Win32.OpenFileDialog();
+            dlg.Title = "3D-Modell öffnen";
+            dlg.Filter = "3D-Modelle (*.stl;*.3mf)|*.stl;*.3mf|STL-Dateien (*.stl)|*.stl|3MF-Dateien (*.3mf)|*.3mf|Alle Dateien (*.*)|*.*";
+            if (_currentFolder != null && Directory.Exists(_currentFolder)) dlg.InitialDirectory = _currentFolder;
+            if (dlg.ShowDialog(this) != true) return;
+            RefreshFolder(dlg.FileName);
+            await LoadFile(dlg.FileName);
+        }
+
+        private void OnOpenFolder(object sender, RoutedEventArgs e)
+        {
+            System.Windows.Forms.FolderBrowserDialog dlg = new System.Windows.Forms.FolderBrowserDialog();
+            dlg.Description = "Ordner mit STL-/3MF-Dateien wählen";
+            dlg.ShowNewFolderButton = false;
+            if (_currentFolder != null && Directory.Exists(_currentFolder)) dlg.SelectedPath = _currentFolder;
+            if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+            _currentFolder = dlg.SelectedPath;
+            RefreshFolder(null);
+        }
+
+        private void RefreshFolder(string selectPath)
+        {
+            if (selectPath != null) _currentFolder = Path.GetDirectoryName(selectPath);
+            if (_currentFolder == null || !Directory.Exists(_currentFolder)) return;
+
+            List<string> files = new List<string>();
+            try
+            {
+                foreach (string f in Directory.GetFiles(_currentFolder))
+                {
+                    bool model = MeshLoader.IsSupported(f);
+                    bool image = IsImageFile(f);
+                    if (!model && !image) continue;
+                    if (_kind == 0 && !model) continue;
+                    if (_kind == 1 && !image) continue;
+                    files.Add(f);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppDialog.Error(this, "Ordner nicht lesbar", ex.Message);
+                return;
+            }
+
+            files.Sort(delegate(string a, string b)
+            {
+                try { return StrCmpLogicalW(Path.GetFileName(a), Path.GetFileName(b)); }
+                catch { return string.Compare(a, b, StringComparison.OrdinalIgnoreCase); }
+            });
+
+            _entries.Clear();
+            foreach (string f in files)
+            {
+                FileEntry fe = new FileEntry();
+                fe.FullPath = f;
+                fe.Name = Path.GetFileName(f);
+                fe.IsImage = IsImageFile(f);
+                _entries.Add(fe);
+            }
+
+            _suppressSelection = true;
+            _fileList.Items.Clear();
+            int selectIndex = -1;
+            for (int i = 0; i < _entries.Count; i++)
+            {
+                _fileList.Items.Add(_entries[i]);
+                if (selectPath != null && string.Equals(_entries[i].FullPath, selectPath, StringComparison.OrdinalIgnoreCase))
+                    selectIndex = i;
+                else if (selectPath == null && _currentFile != null &&
+                         string.Equals(_entries[i].FullPath, _currentFile, StringComparison.OrdinalIgnoreCase))
+                    selectIndex = i;
+            }
+            if (selectIndex >= 0)
+            {
+                _fileList.SelectedIndex = selectIndex;
+                _fileList.ScrollIntoView(_fileList.SelectedItem);
+            }
+            _suppressSelection = false;
+
+            _folderLabel.Text = _currentFolder;
+            _folderLabel.ToolTip = _currentFolder;
+            _countLabel.Text = _entries.Count == 1 ? "1 Datei" : _entries.Count + " Dateien";
+        }
+
+        private static readonly string[] ImageExtensions =
+            { ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff" };
+
+        private static bool IsImageFile(string path)
+        {
+            string e = Path.GetExtension(path).ToLowerInvariant();
+            foreach (string x in ImageExtensions) if (e == x) return true;
+            return false;
+        }
+
+        private void SetKind(int kind)
+        {
+            _kind = kind;
+            for (int i = 0; i < _kindBtns.Length; i++)
+                _kindBtns[i].Style = (Style)Application.Current.Resources[i == kind ? "BtnPrimary" : "BtnChip"];
+            RefreshFolder(null);
+        }
+
+        private async void OnFileSelected(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressSelection) return;
+            FileEntry fe = _fileList.SelectedItem as FileEntry;
+            if (fe == null) return;
+            if (string.Equals(fe.FullPath, _currentFile, StringComparison.OrdinalIgnoreCase)) return;
+            if (fe.IsImage) ShowImage(fe.FullPath);
+            else await LoadFile(fe.FullPath);
+        }
+
+        // =================================================================
+        //  Bildansicht
+        // =================================================================
+
+        /// <summary>Zeigt eine Bilddatei anstelle der 3D-Ansicht.</summary>
+        private void ShowImage(string path)
+        {
+            BitmapSource src = ImageStore.Load(path);
+            if (src == null)
+            {
+                AppDialog.Error(this, "Bild konnte nicht geöffnet werden", Path.GetFileName(path));
+                return;
+            }
+            _imageView.Source = src;
+            _imageView.Visibility = Visibility.Visible;
+            _viewport.Visibility = Visibility.Collapsed;
+            _logoImage.Visibility = Visibility.Collapsed;
+            _emptyHint.Visibility = Visibility.Collapsed;
+            _showingImage = true;
+            _currentFile = path;
+            UpdateStatus();
+            UpdateImageToggle();
+            Title = Path.GetFileName(path) + " – Elas3DView";
+        }
+
+        /// <summary>Zurück zur 3D-Ansicht des geladenen Modells.</summary>
+        private void ShowModelView()
+        {
+            _showingImage = false;
+            _imageView.Visibility = Visibility.Collapsed;
+            _imageView.Source = null;
+            _viewport.Visibility = Visibility.Visible;
+            _emptyHint.Visibility = _model == null ? Visibility.Visible : Visibility.Collapsed;
+            UpdateLogo();
+            if (_modelFile != null) _currentFile = _modelFile;
+            UpdateStatus();
+            UpdateImageToggle();
+            Title = (_modelFile == null ? "" : Path.GetFileName(_modelFile) + " – ") + "Elas3DView";
+        }
+
+        /// <summary>Erstes Bild, das denselben Namen trägt wie das geladene Modell.</summary>
+        private string ModelImage()
+        {
+            if (_modelFile == null) return null;
+            List<string> found = Sidecars(_modelFile);
+            return found.Count > 0 ? found[0] : null;
+        }
+
+        private void UpdateImageToggle()
+        {
+            if (_btnImageToggle == null) return;
+            if (_showingImage)
+            {
+                _btnImageToggle.Content = "Modell zeigen";
+                _btnImageToggle.IsEnabled = _model != null;
+                return;
+            }
+            _btnImageToggle.Content = "Bild zeigen";
+            _btnImageToggle.IsEnabled = ModelImage() != null;
+        }
+
+        /// <summary>Wechselt zwischen dem Modell und seinem Vorschaubild.</summary>
+        private void ToggleImage(object sender, RoutedEventArgs e)
+        {
+            if (_showingImage) { ShowModelView(); SelectInList(_modelFile); return; }
+            string img = ModelImage();
+            if (img == null)
+            {
+                AppDialog.Info(this, "Kein Bild vorhanden",
+                    _modelFile == null
+                        ? "Bitte zuerst ein Modell öffnen."
+                        : "Zu " + Path.GetFileName(_modelFile) + " liegt noch kein Bild im Ordner.\n\n" +
+                          "Mit „JPG speichern\" lässt sich eines erzeugen.");
+                return;
+            }
+            ShowImage(img);
+            SelectInList(img);
+        }
+
+        /// <summary>Hebt eine Datei in der Liste hervor, ohne ein Laden auszulösen.</summary>
+        private void SelectInList(string path)
+        {
+            if (path == null) return;
+            _suppressSelection = true;
+            for (int i = 0; i < _fileList.Items.Count; i++)
+            {
+                FileEntry fe = _fileList.Items[i] as FileEntry;
+                if (fe != null && string.Equals(fe.FullPath, path, StringComparison.OrdinalIgnoreCase))
+                {
+                    _fileList.SelectedIndex = i;
+                    _fileList.ScrollIntoView(_fileList.SelectedItem);
+                    break;
+                }
+            }
+            _suppressSelection = false;
+        }
+
+        private void StepFile(int delta)
+        {
+            if (_fileList.Items.Count == 0) return;
+            int i = _fileList.SelectedIndex + delta;
+            if (i < 0) i = 0;
+            if (i >= _fileList.Items.Count) i = _fileList.Items.Count - 1;
+            _fileList.SelectedIndex = i;
+            _fileList.ScrollIntoView(_fileList.SelectedItem);
+        }
+
+        private async Task LoadFile(string path)
+        {
+            if (_busyActive) return;
+            ShowBusy("Lade " + Path.GetFileName(path) + " …", false);
+            await Task.Delay(1);          // Hinweis zeichnen lassen, bevor aufgeräumt wird
+
+            // Das alte Netz vorher loslassen, sonst liegen beim Wechsel kurz zwei
+            // große Modelle nebeneinander im Speicher. Die Ansicht verdeckt in
+            // diesem Moment ohnehin der Ladehinweis.
+            if (_liveMesh != null)
+            {
+                _liveScene.Children.Remove(_liveMesh);
+                _liveMesh = null;
+            }
+            _model = null;
+            TrimMemory();
+
+            try
+            {
+                LoadedModel m = await Task.Run<LoadedModel>(delegate { return MeshLoader.Load(path); });
+                SetModel(m, path);
+            }
+            catch (Exception ex)
+            {
+                ClearModel();             // das alte Netz ist bereits fort
+                HideBusy();
+                AppDialog.Error(this, "Datei konnte nicht geladen werden",
+                    Path.GetFileName(path) + "\n\n" + ex.Message);
+                return;
+            }
+            HideBusy();
+        }
+
+        private void SetModel(LoadedModel m, string path)
+        {
+            _model = m;
+            _currentFile = path;
+            _modelFile = path;
+
+            if (_liveMesh != null) _liveScene.Children.Remove(_liveMesh);
+            _liveMesh = NewMeshModel();
+            _liveScene.Children.Add(_liveMesh);
+
+            _showingImage = false;
+            _imageView.Visibility = Visibility.Collapsed;
+            _imageView.Source = null;
+            _viewport.Visibility = Visibility.Visible;
+            _emptyHint.Visibility = Visibility.Collapsed;
+            UpdateLogo();
+
+            FitToModel(true);
+            UpdateCamera();
+            UpdateStatus();
+            UpdateImageToggle();
+            Title = Path.GetFileName(path) + " – Elas3DView";
+            TrimMemory();
+        }
+
+        /// <summary>
+        /// Gibt den Speicher abgelegter Modelle an das Betriebssystem zurück.
+        ///
+        /// Ein fallengelassenes Netz liegt im Bereich für große Felder, und den räumt
+        /// die Laufzeit von sich aus selten auf: beim Durchblättern von fünf großen
+        /// Modellen wuchs der Verbrauch gemessen auf 1,4 GB, obwohl immer nur eines
+        /// gebraucht wurde — nach einem verdichtenden Durchlauf blieben 9 MB übrig.
+        /// Unterhalb der Schwelle wird nichts getan; bei kleinen Teilen kostet das
+        /// nur Zeit.
+        /// </summary>
+        private static void TrimMemory()
+        {
+            try
+            {
+                Process p = Process.GetCurrentProcess();
+                p.Refresh();
+                if (p.PrivateMemorySize64 < 400L * 1048576L) return;
+
+                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            }
+            catch { }
+        }
+
+        private void ClearModel()
+        {
+            if (_liveMesh != null) _liveScene.Children.Remove(_liveMesh);
+            _liveMesh = null;
+            _model = null;
+            _currentFile = null;
+            _modelFile = null;
+            _showingImage = false;
+            _imageView.Visibility = Visibility.Collapsed;
+            _imageView.Source = null;
+            _viewport.Visibility = Visibility.Visible;
+            _emptyHint.Visibility = Visibility.Visible;
+            UpdateStatus();
+            UpdateImageToggle();
+            Title = "Elas3DView";
+            TrimMemory();
+        }
+
+        private void UpdateStatus()
+        {
+            if (_currentFile == null)
+            {
+                _statusFile.Text = "";
+                _statusInfo.Text = "";
+                return;
+            }
+
+            long bytes = 0;
+            try { bytes = new FileInfo(_currentFile).Length; }
+            catch { }
+            _statusFile.Text = Path.GetFileName(_currentFile);
+
+            if (_showingImage)
+            {
+                BitmapSource b = _imageView.Source as BitmapSource;
+                _statusInfo.Text = b == null
+                    ? "Bild  ·  " + FormatBytes(bytes)
+                    : string.Format(CultureInfo.CurrentCulture, "Bild  ·  {0:N0} × {1:N0} px  ·  {2}",
+                        b.PixelWidth, b.PixelHeight, FormatBytes(bytes));
+                return;
+            }
+
+            if (_model == null) { _statusInfo.Text = ""; return; }
+            Vector3D s = _model.Size;
+            _statusInfo.Text = string.Format(CultureInfo.CurrentCulture,
+                "{0}  ·  {1:N0} Dreiecke  ·  {2:N1} × {3:N1} × {4:N1} mm  ·  {5:N1} cm³  ·  {6}",
+                _model.Format, _model.TriangleCount, s.X, s.Y, s.Z, _model.VolumeMm3 / 1000.0, FormatBytes(bytes));
+        }
+
+        private static string FormatBytes(long b)
+        {
+            if (b >= 1048576) return (b / 1048576.0).ToString("N1", CultureInfo.CurrentCulture) + " MB";
+            if (b >= 1024) return (b / 1024.0).ToString("N0", CultureInfo.CurrentCulture) + " kB";
+            return b + " B";
+        }
+
+        private void ShowBusy(string text, bool cancellable)
+        {
+            _busyActive = true;
+            _cancelRequested = false;
+            _busyText.Text = text;
+            _busyCancel.Visibility = cancellable ? Visibility.Visible : Visibility.Collapsed;
+            _busy.Visibility = Visibility.Visible;
+            Mouse.OverrideCursor = Cursors.Wait;
+        }
+
+        private void BusyText(string text) { _busyText.Text = text; }
+
+        private void HideBusy()
+        {
+            _busyActive = false;
+            _busy.Visibility = Visibility.Collapsed;
+            Mouse.OverrideCursor = null;
+        }
+
+        // =================================================================
+        //  JPG-Export
+        // =================================================================
+
+        private int TargetWidth()
+        {
+            int i = _cbWidth == null ? 2 : _cbWidth.SelectedIndex;
+            if (i < 0 || i >= WidthValues.Length) i = 2;
+            return WidthValues[i];
+        }
+
+        private async void OnSaveJpg(object sender, RoutedEventArgs e)
+        {
+            if (_model == null || _modelFile == null)
+            {
+                AppDialog.Info(this, "Kein Modell geladen",
+                    "Bitte zuerst eine STL- oder 3MF-Datei öffnen.");
+                return;
+            }
+            if (_showingImage) ShowModelView();
+            if (!ContrastOkay()) return;
+
+            string target = Path.Combine(Path.GetDirectoryName(_modelFile),
+                                         Path.GetFileNameWithoutExtension(_modelFile) + ".jpg");
+
+            if (File.Exists(target))
+            {
+                DlgResult r = AppDialog.Choose(this, "Bild existiert bereits",
+                    "Im Ordner liegt schon " + Path.GetFileName(target) + ".\n\nWas soll damit geschehen?",
+                    "Überschreiben", "Danebenlegen");
+                if (r == DlgResult.Cancel) return;
+                if (r == DlgResult.Alt) target = UniquePath(target);
+            }
+
+            // Bei einer Million Dreiecken rechnet der Weichzeichner mehrere Sekunden.
+            // Erst anzeigen, einen Zeichendurchlauf abwarten, dann rechnen.
+            ShowBusy("Bild wird erzeugt …", false);
+            await Task.Delay(1);
+            try
+            {
+                SaveSnapshot(target);
+                HideBusy();
+                RefreshFolder(null);
+                UpdateImageToggle();
+                Toast("Gespeichert: " + Path.GetFileName(target), true);
+            }
+            catch (Exception ex)
+            {
+                HideBusy();
+                AppDialog.Error(this, "Bild konnte nicht gespeichert werden", ex.Message);
+            }
+        }
+
+        private static string UniquePath(string path)
+        {
+            string dir = Path.GetDirectoryName(path);
+            string baseName = Path.GetFileNameWithoutExtension(path);
+            string ext = Path.GetExtension(path);
+            for (int i = 1; i < 10000; i++)
+            {
+                string p = Path.Combine(dir, baseName + "_" + i + ext);
+                if (!File.Exists(p)) return p;
+            }
+            return path;
+        }
+
+        private void SaveSnapshot(string targetPath)
+        {
+            int w = TargetWidth();
+            int h = (int)Math.Round(w / Math.Max(0.2, ViewAspect()));
+            if (h < 16) h = 16;
+
+            BitmapSource img = RenderOffscreen(w, h);
+
+            JpegBitmapEncoder enc = new JpegBitmapEncoder();
+            enc.QualityLevel = 92;
+            enc.Frames.Add(BitmapFrame.Create(img));
+            using (FileStream fs = new FileStream(targetPath, FileMode.Create, FileAccess.Write))
+                enc.Save(fs);
+        }
+
+        /// <summary>Rendert die aktuelle Ansicht abseits des Bildschirms, mit 2× Supersampling.</summary>
+        private BitmapSource RenderOffscreen(int width, int height)
+        {
+            int ss = 2;
+            if ((long)width * ss * height * ss > 60000000L) ss = 1;
+            int rw = width * ss, rh = height * ss;
+
+            Model3DGroup scene = new Model3DGroup();
+            scene.Children.Add(new AmbientLight(_ambient.Color));
+            scene.Children.Add(new DirectionalLight(_key.Color, _key.Direction));
+            scene.Children.Add(new DirectionalLight(_fill.Color, _fill.Direction));
+            scene.Children.Add(new DirectionalLight(_rim.Color, _rim.Direction));
+            scene.Children.Add(NewMeshModel());
+
+            ModelVisual3D mv = new ModelVisual3D();
+            mv.Content = scene;
+
+            Viewport3D vp = new Viewport3D();
+            vp.Camera = (Camera)_viewport.Camera.Clone();
+            vp.Children.Add(mv);
+
+            Grid host = new Grid();
+            host.Background = ExportBackground(rw / Math.Max(4.0, _viewHost.ActualWidth));
+            host.Children.Add(vp);
+
+            // Dasselbe Logo wie in der Ansicht, auf die Breite des Bildes gerechnet.
+            if (_logoImage != null && _logoImage.Visibility == Visibility.Visible && _logoImage.Source != null)
+            {
+                Image mark = new Image();
+                mark.Source = _logoImage.Source;
+                mark.Stretch = Stretch.Uniform;
+                RenderOptions.SetBitmapScalingMode(mark, BitmapScalingMode.HighQuality);
+                LayoutLogo(mark, rw);
+                host.Children.Add(mark);
+            }
+
+            Size size = new Size(rw, rh);
+            host.Measure(size);
+            host.Arrange(new Rect(size));
+            host.UpdateLayout();
+
+            RenderTargetBitmap rtb = new RenderTargetBitmap(rw, rh, 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(host);
+            rtb.Freeze();
+            if (ss == 1) return rtb;
+
+            DrawingVisual dv = new DrawingVisual();
+            RenderOptions.SetBitmapScalingMode(dv, BitmapScalingMode.HighQuality);
+            using (DrawingContext dc = dv.RenderOpen())
+                dc.DrawImage(rtb, new Rect(0, 0, width, height));
+
+            RenderTargetBitmap final = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+            final.Render(dv);
+            final.Freeze();
+            return final;
+        }
+
+        private async void OnBatchJpg(object sender, RoutedEventArgs e)
+        {
+            // Nur Modelle, auch wenn die Liste gerade Bilder mit anzeigt.
+            List<FileEntry> list = new List<FileEntry>();
+            foreach (FileEntry entry in _entries) if (!entry.IsImage) list.Add(entry);
+
+            if (list.Count == 0)
+            {
+                AppDialog.Info(this, "Keine Modelle", "In diesem Ordner liegen keine STL- oder 3MF-Dateien.");
+                return;
+            }
+            if (!AppDialog.Confirm(this, "Alle als JPG speichern",
+                    "Für alle " + list.Count + " Modelle in\n" + _currentFolder +
+                    "\nein JPG in der aktuellen Ausrichtung erzeugen?\n\nVorhandene Bilder werden überschrieben.",
+                    "Erzeugen", false))
+                return;
+
+            if (_showingImage) ShowModelView();
+            if (!ContrastOkay()) return;
+            string keepFile = _modelFile;
+            int done = 0, failed = 0;
+
+            ShowBusy("Erzeuge Vorschaubilder …", true);
+            try
+            {
+                for (int i = 0; i < list.Count; i++)
+                {
+                    if (_cancelRequested) break;
+                    FileEntry fe = list[i];
+                    BusyText(string.Format("{0} / {1}   {2}", i + 1, list.Count, fe.Name));
+                    await Task.Delay(1);
+
+                    try
+                    {
+                        string p = fe.FullPath;
+                        LoadedModel m = await Task.Run<LoadedModel>(delegate { return MeshLoader.Load(p); });
+                        _model = m;
+                        _currentFile = p;
+                        _modelFile = p;
+                        if (_liveMesh != null) _liveScene.Children.Remove(_liveMesh);
+                        _liveMesh = NewMeshModel();
+                        _liveScene.Children.Add(_liveMesh);
+                        FitToModel(true);
+                        UpdateCamera();
+                        TrimMemory();
+
+                        SaveSnapshot(Path.Combine(Path.GetDirectoryName(p),
+                                                  Path.GetFileNameWithoutExtension(p) + ".jpg"));
+                        done++;
+                    }
+                    catch { failed++; }
+                }
+            }
+            finally { HideBusy(); }
+
+            if (keepFile != null && File.Exists(keepFile))
+            {
+                _currentFile = null;
+                await LoadFile(keepFile);
+            }
+            UpdateStatus();
+
+            string msg = done + (done == 1 ? " Bild wurde erzeugt." : " Bilder wurden erzeugt.");
+            if (failed > 0) msg += "\n" + failed + (failed == 1 ? " Datei" : " Dateien") + " konnten nicht gelesen werden.";
+            if (_cancelRequested) msg += "\nDer Vorgang wurde abgebrochen.";
+            if (failed > 0) AppDialog.Warn(this, "Vorschaubilder", msg);
+            else AppDialog.Success(this, "Vorschaubilder", msg);
+        }
+
+        // =================================================================
+        //  Umbenennen
+        // =================================================================
+
+        private List<string> Sidecars(string modelPath)
+        {
+            List<string> found = new List<string>();
+            string dir = Path.GetDirectoryName(modelPath);
+            string b = Path.GetFileNameWithoutExtension(modelPath);
+            string[] exts = { ".jpg", ".jpeg", ".png" };
+            foreach (string se in exts)
+            {
+                string p = Path.Combine(dir, b + se);
+                if (File.Exists(p)) found.Add(p);
+            }
+            return found;
+        }
+
+        private void OnRename(object sender, RoutedEventArgs e)
+        {
+            if (_currentFile == null || !File.Exists(_currentFile))
+            {
+                AppDialog.Info(this, "Kein Modell geladen", "Bitte zuerst eine Datei öffnen.");
+                return;
+            }
+
+            string oldPath = _currentFile;
+            string dir = Path.GetDirectoryName(oldPath);
+            string ext = Path.GetExtension(oldPath);
+            string oldBase = Path.GetFileNameWithoutExtension(oldPath);
+
+            // Nur ein Modell zieht seine Bilder mit; ein Bild wird für sich umbenannt.
+            List<string> sidecars = MeshLoader.IsSupported(oldPath)
+                ? Sidecars(oldPath) : new List<string>();
+
+            RenameDialog dlg = new RenameDialog(oldBase, ext, sidecars.Count);
+            dlg.Owner = this;
+            SetScrim(true);
+            bool ok;
+            try { ok = dlg.ShowDialog() == true; }
+            finally { SetScrim(false); }
+            if (!ok) return;
+
+            string newBase = dlg.NewBaseName;
+            if (string.Equals(newBase, oldBase, StringComparison.Ordinal)) return;
+
+            string newPath = Path.Combine(dir, newBase + ext);
+            if (File.Exists(newPath))
+            {
+                AppDialog.Warn(this, "Name schon vergeben",
+                    "Es gibt bereits eine Datei mit diesem Namen:\n\n" + Path.GetFileName(newPath));
+                return;
+            }
+
+            try { File.Move(oldPath, newPath); }
+            catch (Exception ex)
+            {
+                AppDialog.Error(this, "Umbenennen fehlgeschlagen", ex.Message);
+                return;
+            }
+
+            int extra = 0;
+            if (dlg.RenameSidecars)
+            {
+                foreach (string p in sidecars)
+                {
+                    string t = Path.Combine(dir, newBase + Path.GetExtension(p));
+                    try { if (!File.Exists(t)) { File.Move(p, t); extra++; } }
+                    catch { }
+                }
+            }
+
+            if (string.Equals(_modelFile, oldPath, StringComparison.OrdinalIgnoreCase)) _modelFile = newPath;
+            _currentFile = newPath;
+            Title = Path.GetFileName(newPath) + " – Elas3DView";
+            RefreshFolder(newPath);
+            UpdateStatus();
+            UpdateImageToggle();
+            Toast("Umbenannt in " + Path.GetFileName(newPath) +
+                  (extra > 0 ? "  (+ " + extra + " Bild" + (extra == 1 ? "" : "er") + ")" : ""), true);
+        }
+
+        // =================================================================
+        //  Löschen
+        // =================================================================
+
+        private void OnDelete(object sender, RoutedEventArgs e)
+        {
+            if (_currentFile == null || !File.Exists(_currentFile))
+            {
+                AppDialog.Info(this, "Kein Modell geladen", "Bitte zuerst eine Datei öffnen.");
+                return;
+            }
+
+            List<string> sidecars = MeshLoader.IsSupported(_currentFile)
+                ? Sidecars(_currentFile) : new List<string>();
+            string list = "•  " + Path.GetFileName(_currentFile);
+            foreach (string p in sidecars) list += "\n•  " + Path.GetFileName(p);
+
+            string tail = sidecars.Count == 0
+                ? "\n\nDie Datei wandert in den Papierkorb und kann von dort zurückgeholt werden."
+                : "\n\nDas zugehörige Bild wird mit weggeräumt. Alles wandert in den Papierkorb und kann von dort zurückgeholt werden.";
+
+            if (!AppDialog.Confirm(this, "Wirklich löschen?", list + tail, "In den Papierkorb", true))
+                return;
+
+            int index = _fileList.SelectedIndex;
+            List<string> victims = new List<string>();
+            victims.Add(_currentFile);
+            victims.AddRange(sidecars);
+
+            int removed = 0;
+            foreach (string p in victims)
+            {
+                try
+                {
+                    Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+                        p,
+                        Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                        Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin,
+                        Microsoft.VisualBasic.FileIO.UICancelOption.ThrowException);
+                    removed++;
+                }
+                catch (Exception ex)
+                {
+                    AppDialog.Error(this, "Löschen fehlgeschlagen",
+                        Path.GetFileName(p) + "\n\n" + ex.Message);
+                    break;
+                }
+            }
+
+            string gone = Path.GetFileName(_currentFile);
+            bool wasModel = string.Equals(_modelFile, _currentFile, StringComparison.OrdinalIgnoreCase);
+            if (wasModel) ClearModel();
+            else
+            {
+                _currentFile = _modelFile;
+                if (_showingImage) ShowModelView();
+            }
+            RefreshFolder(null);
+            UpdateImageToggle();
+
+            // Nachbarn auswählen, damit man zügig weiterarbeiten kann
+            if (_fileList.Items.Count > 0)
+            {
+                if (index >= _fileList.Items.Count) index = _fileList.Items.Count - 1;
+                if (index < 0) index = 0;
+                _fileList.SelectedIndex = index;
+                _fileList.ScrollIntoView(_fileList.SelectedItem);
+            }
+
+            Toast(gone + " in den Papierkorb verschoben" +
+                  (removed > 1 ? " (mit " + (removed - 1) + " Bild" + (removed == 2 ? "" : "ern") + ")" : ""), true);
+        }
+
+        // =================================================================
+        //  Einstellungen
+        // =================================================================
+
+        private static string SettingsPath()
+        {
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Elas3DView");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "settings.txt");
+        }
+
+        private void SaveSettings()
+        {
+            try
+            {
+                List<string> lines = new List<string>();
+                lines.Add("folder=" + (_currentFolder ?? ""));
+                lines.Add("theme=" + (Theme.IsDark ? "dark" : "light"));
+                lines.Add("background=" + _bgPreset);
+                lines.Add("bgimage=" + (_bgImage ?? ""));
+                lines.Add("finish=" + _cbFinish.SelectedIndex);
+                lines.Add("color=" + ColorPickerButton.HexOf(_modelColor));
+                lines.Add("width=" + _cbWidth.SelectedIndex);
+                lines.Add("jpgbg=" + _cbJpgBg.SelectedIndex);
+                lines.Add("kind=" + _kind);
+                lines.Add("logo=" + (_logoFile ?? ""));
+                lines.Add("logopos=" + _logoPos.Index);
+                lines.Add("logosize=" + ((int)_logoPercent));
+                lines.Add("ortho=" + (_ortho ? "1" : "0"));
+                lines.Add("yaw=" + _yaw.ToString("R", CultureInfo.InvariantCulture));
+                lines.Add("pitch=" + _pitch.ToString("R", CultureInfo.InvariantCulture));
+
+                string recent = "";
+                foreach (Color c in ColorPickerButton.Recent)
+                    recent += (recent.Length > 0 ? "," : "") + ColorPickerButton.HexOf(c);
+                lines.Add("recent=" + recent);
+
+                File.WriteAllLines(SettingsPath(), lines.ToArray());
+            }
+            catch { }
+        }
+
+        private void LoadSettings()
+        {
+            try
+            {
+                string p = SettingsPath();
+                if (!File.Exists(p)) return;
+                foreach (string line in File.ReadAllLines(p))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string k = line.Substring(0, eq);
+                    string v = line.Substring(eq + 1);
+                    int iv;
+                    double dv;
+                    switch (k)
+                    {
+                        case "folder": if (Directory.Exists(v)) _currentFolder = v; break;
+                        case "theme": if (v == "light" && Theme.IsDark) Theme.Apply(false); break;
+                        case "background":
+                            if (int.TryParse(v, out iv) && iv >= 0 && iv < BackgroundNames.Length)
+                                _bgPreset = iv;
+                            break;
+                        case "bgimage": _bgImage = v.Length > 0 ? v : null; break;
+                        case "finish":
+                            if (int.TryParse(v, out iv) && iv >= 0 && iv < FinishNames.Length)
+                                _cbFinish.SelectedIndex = iv;
+                            break;
+                        case "color":
+                            _modelColor = ColorPickerButton.ParseHex(v);
+                            _colorBtn.SelectedColor = _modelColor;
+                            break;
+                        case "width":
+                            if (int.TryParse(v, out iv) && iv >= 0 && iv < WidthValues.Length)
+                                _cbWidth.SelectedIndex = iv;
+                            break;
+                        case "jpgbg":
+                            if (int.TryParse(v, out iv) && iv >= 0 && iv < JpgBgNames.Length)
+                                _cbJpgBg.SelectedIndex = iv;
+                            break;
+                        case "kind":
+                            if (int.TryParse(v, out iv) && iv >= 0 && iv <= 2) _kind = iv;
+                            break;
+                        case "logo": _logoFile = v.Length > 0 ? v : null; break;
+                        case "logopos":
+                            if (int.TryParse(v, out iv)) _logoPos.Index = iv;
+                            break;
+                        case "logosize":
+                            if (int.TryParse(v, out iv) && iv >= 4 && iv <= 45)
+                            {
+                                _logoPercent = iv;
+                                _sldLogo.Value = iv;
+                            }
+                            break;
+                        case "ortho": _chkOrtho.IsChecked = v == "1"; break;
+                        case "yaw":
+                            if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out dv)) _yaw = dv;
+                            break;
+                        case "pitch":
+                            if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out dv)) _pitch = dv;
+                            break;
+                        case "recent":
+                            ColorPickerButton.Recent.Clear();
+                            foreach (string hex in v.Split(','))
+                                if (hex.Length >= 6) ColorPickerButton.Recent.Add(ColorPickerButton.ParseHex(hex));
+                            break;
+                    }
+                }
+            }
+            catch { }
+        }
+    }
+}

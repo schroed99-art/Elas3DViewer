@@ -9,3 +9,6 @@ desktop.ini
 *.user
 *.suo
 .vs/
+
+# Gebautes Setup — entsteht durch setup.cmd.
+dist/

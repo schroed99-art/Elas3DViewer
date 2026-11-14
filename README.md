@@ -24,6 +24,28 @@ Einmalig `Verknuepfung-anlegen.cmd` ausführen legt eine Verknüpfung auf dem
 Desktop und im Startmenü an. Der Ordner lässt sich als Ganzes verschieben oder
 auf einen anderen Rechner kopieren.
 
+### Setup für andere Rechner
+
+**`setup.cmd`** baut `dist\Elas3DView-Setup.exe` — eine einzelne Datei, rund
+600 kB, die Anwendung steckt darin. Vorher wird die Anwendung frisch gebaut.
+
+- Installiert für den angemeldeten Benutzer nach
+  `%LOCALAPPDATA%\Programs\Elas3DView`, **ohne Administratorrechte**. Unter
+  `C:\Programme` ginge es nicht: Die Anwendung schreibt neben sich in
+  `logos\` und `hintergruende\`.
+- Legt Startmenü- und (wahlweise) Desktop-Verknüpfung an und bietet STL und
+  3MF unter „Öffnen mit" an. Die Standard-App für die Endungen bleibt, wie sie ist.
+- Steht danach unter *Einstellungen → Apps* und lässt sich dort entfernen.
+  Eigene Bilder in `logos\`/`hintergruende\` werden dabei nur auf Nachfrage
+  gelöscht; die Einstellungen in `%APPDATA%\Elas3DView` bleiben.
+- Ein zweites Setup über ein vorhandenes heißt „Aktualisieren" und behält die
+  Haken vom letzten Mal.
+- Still: `Elas3DView-Setup.exe /silent` bzw. `Deinstallieren.exe /uninstall /silent`.
+
+Das Setup ist nicht signiert. Beim ersten Start aus einem Download meldet
+Windows SmartScreen „Unbekannter Herausgeber" → *Weitere Informationen* →
+*Trotzdem ausführen*.
+
 ---
 
 ## Bedienung

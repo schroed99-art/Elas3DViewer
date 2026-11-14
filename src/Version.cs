@@ -49,11 +49,18 @@ namespace Elas3DView
     /// </summary>
     public static class AppVersion
     {
-        public const string Current = "1.4.0";
+        public const string Current = "1.5.0";
 
         /// <summary>Neueste zuerst. Der erste Eintrag gehört zu <see cref="Current"/>.</summary>
         public static readonly ReleaseNote[] Notes =
         {
+            new ReleaseNote("1.5.0", "14.11.2026",
+                "Neu: „Aktualisieren“ über der Dateiliste (auch F5) liest den Ordner neu ein — was " +
+                    "inzwischen dazugekommen oder verschwunden ist, steht danach in der Liste.",
+                "Eine Meldung sagt, was sich getan hat: neue Dateien, fehlende oder nichts.",
+                "Kommt man aus einem anderen Programm zurück, sieht Elas3DView von selbst nach. " +
+                    "Auswahl und Häkchen bleiben dabei erhalten."),
+
             new ReleaseNote("1.4.0", "14.11.2026",
                 "Neu: mehrere Dateien für EINE Modellakte. In der Dateiliste rechts anhaken, was " +
                     "zum geöffneten Modell gehört — bei „Ins PrintFlow …“ gehen diese STL und 3MF " +

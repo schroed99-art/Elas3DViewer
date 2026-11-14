@@ -165,6 +165,7 @@ namespace Elas3DView
             Drop += OnDrop;
             DragOver += OnDragOver;
             Loaded += OnLoaded;
+            Activated += OnWindowActivated;
             SourceInitialized += delegate { Theme.ApplyTitleBar(this); };
             Theme.Changed += delegate { OnThemeChanged(); };
             Closing += delegate { SaveSettings(); };
@@ -449,14 +450,28 @@ namespace Elas3DView
             DockPanel dp = new DockPanel();
             shell.Child = dp;
 
+            // Überschrift und, rechts daneben, „Aktualisieren" (Tristan, 14.11.2026:
+            // „wenn während der Arbeit neue Dateien hinzugekommen sind, dass die
+            // Anzeige erneuert wird"). F5 tat das schon immer — nur stand es
+            // nirgends, und es sagte nicht, ob sich etwas getan hat.
+            DockPanel headRow = new DockPanel();
+            headRow.Margin = new Thickness(4, 0, 4, 6);
+            DockPanel.SetDock(headRow, Dock.Top);
+            dp.Children.Add(headRow);
+
+            Button refresh = Chip("Aktualisieren",
+                "Ordner neu einlesen: zeigt, was inzwischen dazugekommen oder verschwunden ist (F5)", OnRefresh);
+            refresh.Margin = new Thickness(0);
+            DockPanel.SetDock(refresh, Dock.Right);
+            headRow.Children.Add(refresh);
+
             TextBlock head = new TextBlock();
             head.Text = "DATEIEN";
             head.FontSize = 10.5;
             head.FontWeight = FontWeights.SemiBold;
-            head.Margin = new Thickness(4, 0, 0, 6);
+            head.VerticalAlignment = VerticalAlignment.Center;
             head.SetResourceReference(TextBlock.ForegroundProperty, "GoldText");
-            DockPanel.SetDock(head, Dock.Top);
-            dp.Children.Add(head);
+            headRow.Children.Add(head);
 
             _folderLabel = new TextBlock();
             _folderLabel.Text = "Kein Ordner gewählt";
@@ -1156,6 +1171,7 @@ namespace Elas3DView
             cm.Items.Add(Item("Umbenennen", "F2", OnRename));
             cm.Items.Add(new Separator());
             cm.Items.Add(Item("Im Explorer zeigen", null, OnShowInExplorer));
+            cm.Items.Add(Item("Aktualisieren", "F5", OnRefresh));
             cm.Items.Add(Item("Häkchen aufheben", null, OnClearMarks));
             cm.Items.Add(new Separator());
             cm.Items.Add(Item("Löschen", "Entf", OnDelete));
@@ -1211,7 +1227,7 @@ namespace Elas3DView
             AddBinding(Key.P, ModifierKeys.Control, OnSendToPrintFlow);
             AddBinding(Key.F2, ModifierKeys.None, OnRename);
             AddBinding(Key.Delete, ModifierKeys.None, OnDelete);
-            AddBinding(Key.F5, ModifierKeys.None, delegate { RefreshFolder(_currentFile); RefreshImageFolders(); });
+            AddBinding(Key.F5, ModifierKeys.None, OnRefresh);
             AddBinding(Key.B, ModifierKeys.None, ToggleImage);
             AddBinding(Key.Space, ModifierKeys.None, delegate { FitToModel(true); UpdateCamera(); });
             AddBinding(Key.D1, ModifierKeys.None, delegate { SetView(-55, 28); });
@@ -1824,6 +1840,109 @@ namespace Elas3DView
             _folderLabel.Text = _currentFolder;
             _folderLabel.ToolTip = _currentFolder;
             UpdateCount();
+        }
+
+        // -------------------------------------------------- Ordner neu einlesen
+
+        private void OnRefresh(object sender, RoutedEventArgs e)
+        {
+            RefreshList(true);
+            RefreshImageFolders();      // Logos und Hintergründe, wie F5 es schon immer tat
+        }
+
+        /// <summary>
+        /// Was die Liste zeigte, läse man den Ordner jetzt — dieselbe Auswahl wie
+        /// in RefreshFolder, aber ohne etwas anzufassen. Null, wenn der Ordner sich
+        /// nicht lesen lässt.
+        /// </summary>
+        private List<string> FolderSnapshot()
+        {
+            List<string> files = new List<string>();
+            try
+            {
+                foreach (string f in Directory.GetFiles(_currentFolder))
+                {
+                    bool model = MeshLoader.IsSupported(f);
+                    bool image = IsImageFile(f);
+                    if (!model && !image) continue;
+                    if (_kind == 0 && !model) continue;
+                    if (_kind == 1 && !image) continue;
+                    files.Add(f);
+                }
+            }
+            catch { return null; }
+            return files;
+        }
+
+        private DateTime _lastFolderCheck = DateTime.MinValue;
+
+        /// <summary>
+        /// Liest den Ordner neu ein, wenn sich darin etwas getan hat, und sagt, was.
+        ///
+        /// ERST VERGLEICHEN, DANN NEU BAUEN. Die Liste neu aufzubauen rückt sie zur
+        /// Auswahl zurück; wer gerade weiter unten liest, soll das nur erleben,
+        /// wenn es einen Grund gibt. Auswahl und Häkchen bleiben in jedem Fall.
+        /// </summary>
+        /// <param name="asked">
+        /// Wahr beim Knopf und bei F5: Dann gibt es immer eine Antwort, auch „der
+        /// Ordner ist unverändert". Falsch, wenn das Fenster von selbst nachsieht —
+        /// dann meldet es sich nur, wenn sich etwas getan hat.
+        /// </param>
+        private void RefreshList(bool asked)
+        {
+            if (_busyActive) return;
+            if (_currentFolder == null || !Directory.Exists(_currentFolder))
+            {
+                if (asked) Toast("Kein Ordner geöffnet", false);
+                return;
+            }
+            _lastFolderCheck = DateTime.UtcNow;
+
+            List<string> now = FolderSnapshot();
+            if (now == null)
+            {
+                if (asked) RefreshFolder(null);     // zeigt die Fehlermeldung
+                return;
+            }
+
+            HashSet<string> before = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (FileEntry fe in _entries) before.Add(fe.FullPath);
+            int added = 0;
+            foreach (string f in now) if (!before.Remove(f)) added++;
+            int gone = before.Count;                // was vorher da war und jetzt fehlt
+
+            if (added == 0 && gone == 0)
+            {
+                if (asked) Toast("Der Ordner ist unverändert", true);
+                return;
+            }
+
+            RefreshFolder(null);
+
+            // Die geöffnete Datei gibt es nicht mehr: Dann zeigt die Ansicht nichts
+            // mehr, was sich speichern oder übernehmen ließe.
+            if (_modelFile != null && !File.Exists(_modelFile)) ClearModel();
+            else if (_showingImage && (_currentFile == null || !File.Exists(_currentFile))) ShowModelView();
+            UpdateImageToggle();
+
+            string what = "";
+            if (added > 0) what = added == 1 ? "1 neue Datei" : added + " neue Dateien";
+            if (gone > 0)
+                what += (what.Length > 0 ? "  ·  " : "") + (gone == 1 ? "1 Datei fehlt jetzt" : gone + " Dateien fehlen jetzt");
+            Toast(what, true);
+        }
+
+        /// <summary>
+        /// Kommt man aus einem anderen Programm zurück — dem Browser, dem Slicer,
+        /// dem Explorer —, sieht das Fenster von selbst nach. Dort entstehen die
+        /// neuen Dateien, und genau dann will man sie sehen. Höchstens alle zwei
+        /// Sekunden: Auch ein eigener Dialog, der sich schließt, gibt das Fenster
+        /// „zurück", und ein Netzordner antwortet nicht umsonst.
+        /// </summary>
+        private void OnWindowActivated(object sender, EventArgs e)
+        {
+            if ((DateTime.UtcNow - _lastFolderCheck).TotalSeconds < 2) return;
+            RefreshList(false);
         }
 
         private static readonly string[] ImageExtensions =
@@ -2811,6 +2930,33 @@ namespace Elas3DView
                                    PictogramOf(MeshLoader.Load(extra)));
             }
             SetModel(MeshLoader.Load(main), main);
+        }
+
+        /// <summary>
+        /// Für die Prüfung ohne Bildschirm (Schalter /dialogbilder): „Aktualisieren"
+        /// an einem Ordner, in dem nacheinander eine Datei dazukommt, verschwindet
+        /// und nichts geschieht. Gearbeitet wird im ZIELORDNER der Probe — der
+        /// gehört ihr; der Ordner des Modells bleibt unberührt.
+        /// </summary>
+        /// <returns>Je Schritt: Zahl der Zeilen und die Meldung.</returns>
+        internal string ProbeRefresh(string dir, string modelPath)
+        {
+            _currentFolder = dir;
+            RefreshFolder(null);
+            string report = "leer:        " + _entries.Count + " Zeilen\r\n";
+
+            string copy = Path.Combine(dir, "probe-neu" + Path.GetExtension(modelPath));
+            File.Copy(modelPath, copy, true);
+            RefreshList(true);
+            report += "dazugelegt:  " + _entries.Count + " Zeilen  |  " + _toastText.Text + "\r\n";
+
+            RefreshList(true);
+            report += "nochmal:     " + _entries.Count + " Zeilen  |  " + _toastText.Text + "\r\n";
+
+            File.Delete(copy);
+            RefreshList(true);
+            report += "weggenommen: " + _entries.Count + " Zeilen  |  " + _toastText.Text + "\r\n";
+            return report;
         }
 
         /// <summary>

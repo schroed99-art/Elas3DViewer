@@ -212,6 +212,19 @@ Was dabei nicht passieren kann: Scheitert irgendein Schritt, oder stimmt der
 Vergleich nicht, kommt die Löschfrage gar nicht erst. Auf dem Rechner bleibt
 dann alles, wie es war.
 
+### Ordner aktualisieren
+
+Über der Dateiliste steht **Aktualisieren** (auch `F5` und im Kontextmenü). Der
+Knopf liest den Ordner neu ein und sagt, was sich getan hat: *2 neue Dateien*,
+*1 Datei fehlt jetzt* oder *Der Ordner ist unverändert*. Auswahl und Häkchen
+bleiben; gibt es die geöffnete Datei nicht mehr, wird die Ansicht geleert.
+
+Kommt man aus einem anderen Programm zurück — dem Browser, dem Slicer, dem
+Explorer —, sieht Elas3DView **von selbst** nach und meldet sich nur, wenn sich
+etwas getan hat. Verglichen wird zuerst; neu aufgebaut wird die Liste nur bei
+einer Änderung, damit sie nicht ohne Grund zur Auswahl zurückspringt. Höchstens
+alle zwei Sekunden, und nicht, während etwas läuft.
+
 #### Mehrere Dateien für eine Modellakte
 
 Ein Modell besteht oft aus mehr als einer Datei — drei Entwürfe derselben
@@ -293,7 +306,7 @@ geschrieben für den, der das Programm benutzt.
 | B | zwischen Modell und Vorschaubild wechseln |
 | F2 | Umbenennen |
 | Entf | Löschen (Papierkorb) |
-| F5 | Datei- und Logoliste aktualisieren |
+| F5 | Ordner neu einlesen (wie der Knopf *Aktualisieren*), dazu Logos und Hintergründe |
 | Leertaste | Einpassen |
 | 1 – 7 | Iso, Vorne, Hinten, Links, Rechts, Oben, Unten |
 | Bild auf / Bild ab | vorheriges / nächstes Modell |

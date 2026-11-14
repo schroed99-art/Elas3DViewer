@@ -598,6 +598,10 @@ namespace Elas3DView
                 Theme.Apply(false);
                 light.ProbeWindow(Path.Combine(dir, "6-fenster-hell.png"));
                 Theme.Apply(true);
+
+                // „Aktualisieren": eine Datei kommt dazu, nichts geschieht, sie verschwindet.
+                File.WriteAllText(Path.Combine(dir, "9-aktualisieren.txt"),
+                                  w.ProbeRefresh(dir, modelPath), new System.Text.UTF8Encoding(true));
             }
             catch (Exception ex)
             {

@@ -168,6 +168,13 @@ namespace Elas3DView
             app.ShutdownMode = ShutdownMode.OnMainWindowClose;
             Theme.Install();
 
+            // Versteckter Schalter für die Prüfung ohne Bildschirm — siehe DialogProbe.
+            if (args != null && args.Length == 3 && args[0] == "/dialogbilder")
+            {
+                DialogProbe.Run(args[1], args[2]);
+                return;
+            }
+
             app.DispatcherUnhandledException += delegate(object s,
                 System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
             {

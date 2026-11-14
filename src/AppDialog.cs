@@ -152,6 +152,14 @@ namespace Elas3DView
             return ring;
         }
 
+        /// <summary>Für die Prüfung ohne Bildschirm: zeichnet eine Meldung in eine Datei, ohne sie zu zeigen.</summary>
+        internal static void SavePicture(string path, DlgKind kind, string title, string message,
+                                         string okText, string cancelText, bool danger)
+        {
+            AppDialog d = new AppDialog(null, kind, title, message, okText, null, cancelText, danger);
+            DialogProbe.Save((FrameworkElement)d.Content, d.Width, path);
+        }
+
         // -------------------------------------------------------- Aufrufhilfen
 
         private static DlgResult Run(Window owner, DlgKind kind, string title, string message,
@@ -196,6 +204,16 @@ namespace Elas3DView
         {
             return Run(owner, danger ? DlgKind.Warn : DlgKind.Question, title, message,
                        okText, null, "Abbrechen", danger) == DlgResult.Ok;
+        }
+
+        /// <summary>
+        /// Rückfrage, bei der auch der Weg zurück einen eigenen Namen trägt — etwa
+        /// „Behalten" statt „Abbrechen", wenn die eigentliche Arbeit schon getan ist.
+        /// </summary>
+        public static bool Ask(Window owner, DlgKind kind, string title, string message,
+                               string okText, string cancelText, bool danger)
+        {
+            return Run(owner, kind, title, message, okText, null, cancelText, danger) == DlgResult.Ok;
         }
 
         /// <summary>Rückfrage mit drei Wegen, etwa Überschreiben / Danebenlegen / Abbrechen.</summary>

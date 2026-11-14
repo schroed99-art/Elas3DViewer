@@ -156,7 +156,10 @@ $assemblies = @(
     'System.IO.Compression',
     'System.IO.Compression.FileSystem',
     'System.Drawing',
-    'System.Windows.Forms'
+    'System.Windows.Forms',
+    'System.Net.Http',
+    'System.Web.Extensions',
+    'System.Security'
 )
 $refs = @()
 foreach ($a in $assemblies) {
@@ -176,7 +179,9 @@ if (Test-Path $assetDir) {
     Get-ChildItem -Path $assetDir -File | ForEach-Object {
         $resources += ('/resource:' + $_.FullName + ',' + $_.Name)
     }
-    Write-Host ('Eingebettet: ' + $resources.Count + ' Logo(s)') -ForegroundColor DarkGray
+    # Darunter auch die Bildmarke des Kopfbands — sie ist kein Wasserzeichen und
+    # wird nicht nach bin\logos geschrieben (welche das sind, steht in Logo.cs).
+    Write-Host ('Eingebettet: ' + $resources.Count + ' Bild(er)') -ForegroundColor DarkGray
 }
 
 Write-Host 'Kompiliere ...' -ForegroundColor DarkGray

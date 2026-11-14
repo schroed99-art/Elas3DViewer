@@ -72,6 +72,8 @@ namespace Elas3DView
         private bool _suppressLogo;
         private bool _suppressBg;
         private bool _contrastAccepted;
+        // Für welchen Grund die Zusage gilt: das JPG (Bildgrund) oder das Titelbild (Ansicht).
+        private bool _contrastAcceptedLikeView;
         private int _bgPreset;
         private string _bgImage;
         private ColorPickerButton _colorBtn;
@@ -87,6 +89,14 @@ namespace Elas3DView
         private bool _busyActive;
         private bool _cancelRequested;
         private string _pendingFile;
+
+        // ---- ElasPrintFlow ---------------------------------------------
+        private PrintFlowClient _pf;
+        private string _pfUrl = PrintFlowClient.DefaultUrl;
+        private string _pfUser = "";
+        private string _pfSession = "";      // nur die Sitzung, nie das Passwort
+        private string _pfCategory = "";
+        private System.Threading.CancellationTokenSource _pfCancel;
 
         private Color _modelColor = Color.FromRgb(0xB6, 0xBC, 0xC4);
         private readonly List<FileEntry> _entries = new List<FileEntry>();
@@ -184,27 +194,16 @@ namespace Elas3DView
 
         private UIElement BuildHeader()
         {
+            StackPanel top = new StackPanel();
+            top.Children.Add(BuildBrandBand());
+
             Border shell = Card();
             shell.Margin = new Thickness(10, 10, 10, 8);
             shell.Padding = new Thickness(14, 9, 14, 9);
+            top.Children.Add(shell);
 
             DockPanel dp = new DockPanel();
             shell.Child = dp;
-
-            TextBlock brand = new TextBlock();
-            brand.Text = "ELAS3DVIEW";
-            brand.FontSize = 13.5;
-            brand.FontWeight = FontWeights.SemiBold;
-            brand.VerticalAlignment = VerticalAlignment.Center;
-            brand.Margin = new Thickness(2, 0, 18, 0);
-            brand.SetResourceReference(TextBlock.ForegroundProperty, "Gold");
-            DockPanel.SetDock(brand, Dock.Left);
-            dp.Children.Add(brand);
-
-            _themeBtn = Chip("Helles Design", "Zwischen hellem und dunklem Design wechseln", OnToggleTheme);
-            _themeBtn.Margin = new Thickness(0);
-            DockPanel.SetDock(_themeBtn, Dock.Right);
-            dp.Children.Add(_themeBtn);
 
             WrapPanel actions = new WrapPanel();
             actions.VerticalAlignment = VerticalAlignment.Center;
@@ -214,13 +213,178 @@ namespace Elas3DView
             actions.Children.Add(Action("JPG speichern", "Aktuelle Ansicht als JPG neben das Modell legen (Strg+S)", OnSaveJpg));
             actions.Children.Add(Action("Alle als JPG …", "Für jede Datei im Ordner ein JPG erzeugen", OnBatchJpg));
             actions.Children.Add(Gap());
+            actions.Children.Add(Action("Ins PrintFlow …",
+                "Modell mit Titelbild in ElasPrintFlow anlegen, danach hier aufräumen (Strg+P)",
+                OnSendToPrintFlow));
+            actions.Children.Add(Gap());
             actions.Children.Add(Action("Umbenennen", "Modelldatei umbenennen (F2)", OnRename));
             Button del = Action("Löschen", "Modell und zugehöriges Bild in den Papierkorb (Entf)", OnDelete);
             del.Style = (Style)Application.Current.Resources["BtnDanger"];
             actions.Children.Add(del);
             dp.Children.Add(actions);
 
-            return shell;
+            return top;
+        }
+
+        /// <summary>
+        /// Das Kopfband, wie ElasPrintFlow es trägt (dort `Titelleiste.tsx`, Handoff
+        /// „Kopfbereich", Variante 1c) — Tristan, 14.11.2026: „übernimm die Ansicht
+        /// aus ElasPrintFlow, also den Header, mit dem Namen Elas3DView geschrieben
+        /// wie ElasPrintFlow."
+        ///
+        /// Die Maße stehen wörtlich drüben: 90 px hoch, 30 px Rand, die Bildmarke
+        /// 50 px, der Name 26 px in zwei Gewichten — „Elas" leicht, der Rest fett,
+        /// ohne Lücke, sonst liest es sich als zwei Namen. Darunter der Leitsatz in
+        /// der Kursiven, rechts die Pillen, unten eine Goldlinie, die an beiden
+        /// Enden ausläuft.
+        ///
+        /// Das Band bleibt dunkel, auch im hellen Design: Die Bildmarke ist die
+        /// helle Fassung, und drüben ist das Band ebenfalls nicht Teil des Themas.
+        /// Deshalb stehen hier feste Farben und keine Verweise auf die Palette.
+        ///
+        /// Manrope und Cormorant Garamond stehen vorn in der Schriftliste; sind sie
+        /// nicht installiert, greifen Segoe UI und Constantia (siehe Theme.cs).
+        /// </summary>
+        private UIElement BuildBrandBand()
+        {
+            Grid band = new Grid();
+            band.Height = 90;
+            band.ClipToBounds = true;
+            band.SnapsToDevicePixels = true;
+
+            // linear-gradient(100deg, #1E1826 0%, #171320 55%, #15121A 100%)
+            LinearGradientBrush ground = new LinearGradientBrush();
+            ground.StartPoint = new Point(0, -0.8);
+            ground.EndPoint = new Point(1, 1.8);
+            ground.GradientStops.Add(new GradientStop(Color.FromRgb(0x1E, 0x18, 0x26), 0));
+            ground.GradientStops.Add(new GradientStop(Color.FromRgb(0x17, 0x13, 0x20), 0.55));
+            ground.GradientStops.Add(new GradientStop(Color.FromRgb(0x15, 0x12, 0x1A), 1));
+            ground.Freeze();
+            band.Background = ground;
+
+            // Der Lichtschein liegt im Band, nicht darüber — das Band schneidet ihn ab.
+            Canvas lights = new Canvas();
+            lights.IsHitTestVisible = false;
+            System.Windows.Shapes.Ellipse glow = new System.Windows.Shapes.Ellipse();
+            glow.Width = 420;
+            glow.Height = 220;
+            RadialGradientBrush shine = new RadialGradientBrush();
+            shine.MappingMode = BrushMappingMode.Absolute;
+            shine.Center = new Point(210, 110);
+            shine.GradientOrigin = new Point(210, 110);
+            shine.RadiusX = 237;
+            shine.RadiusY = 237;
+            shine.GradientStops.Add(new GradientStop(Color.FromArgb(41, 0xD3, 0x9A, 0x39), 0));
+            shine.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0xD3, 0x9A, 0x39), 0.68));
+            shine.Freeze();
+            glow.Fill = shine;
+            Canvas.SetLeft(glow, 120);
+            Canvas.SetTop(glow, -90);
+            lights.Children.Add(glow);
+            band.Children.Add(lights);
+
+            DockPanel row = new DockPanel();
+            row.LastChildFill = false;
+            row.Margin = new Thickness(30, 0, 30, 0);
+            band.Children.Add(row);
+
+            BitmapSource markSource = BrandMark();
+            if (markSource != null)
+            {
+                Image mark = new Image();
+                mark.Source = markSource;
+                mark.Height = 50;
+                mark.Stretch = Stretch.Uniform;
+                mark.VerticalAlignment = VerticalAlignment.Center;
+                mark.Margin = new Thickness(0, 0, 20, 0);
+                RenderOptions.SetBitmapScalingMode(mark, BitmapScalingMode.HighQuality);
+                DockPanel.SetDock(mark, Dock.Left);
+                row.Children.Add(mark);
+            }
+
+            StackPanel words = new StackPanel();
+            words.VerticalAlignment = VerticalAlignment.Center;
+            DockPanel.SetDock(words, Dock.Left);
+            row.Children.Add(words);
+
+            TextBlock name = new TextBlock();
+            name.FontFamily = new FontFamily("Manrope, Segoe UI Variable Display, Segoe UI");
+            name.FontSize = 26;
+            name.LineHeight = 29;
+            name.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+            name.Foreground = FixedBrush(0xFB, 0xF4, 0xEE);
+            System.Windows.Documents.Run thin = new System.Windows.Documents.Run("Elas");
+            thin.FontWeight = FontWeights.Light;
+            System.Windows.Documents.Run bold = new System.Windows.Documents.Run("3DView");
+            bold.FontWeight = FontWeights.Bold;
+            name.Inlines.Add(thin);
+            name.Inlines.Add(bold);
+            words.Children.Add(name);
+
+            TextBlock motto = new TextBlock();
+            motto.Text = "Vom Modell zum Vorschaubild";
+            motto.FontFamily = new FontFamily("Cormorant Garamond, Constantia, Georgia");
+            motto.FontStyle = FontStyles.Italic;
+            motto.FontSize = 15.5;
+            motto.Margin = new Thickness(1, 4, 0, 0);
+            motto.Foreground = FixedBrush(0xC9, 0xA9, 0x8C);
+            words.Children.Add(motto);
+
+            _themeBtn = Styled("BtnBand", "Helles Design", "Zwischen hellem und dunklem Design wechseln", OnToggleTheme);
+            _themeBtn.VerticalAlignment = VerticalAlignment.Center;
+            DockPanel.SetDock(_themeBtn, Dock.Right);
+            row.Children.Add(_themeBtn);
+
+            // Die Abschlusslinie läuft an beiden Enden aus — eine durchgezogene
+            // Kante schnitte das Band vom Rest ab, statt es abzuschließen.
+            Border line = new Border();
+            line.Height = 1;
+            line.VerticalAlignment = VerticalAlignment.Bottom;
+            line.IsHitTestVisible = false;
+            LinearGradientBrush gold = new LinearGradientBrush();
+            gold.StartPoint = new Point(0, 0);
+            gold.EndPoint = new Point(1, 0);
+            gold.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0xD3, 0x9A, 0x39), 0));
+            gold.GradientStops.Add(new GradientStop(Color.FromArgb(128, 0xD3, 0x9A, 0x39), 0.22));
+            gold.GradientStops.Add(new GradientStop(Color.FromArgb(128, 0xD3, 0x9A, 0x39), 0.78));
+            gold.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0xD3, 0x9A, 0x39), 1));
+            gold.Freeze();
+            line.Background = gold;
+            band.Children.Add(line);
+
+            return band;
+        }
+
+        private static SolidColorBrush FixedBrush(byte r, byte g, byte b)
+        {
+            SolidColorBrush brush = new SolidColorBrush(Color.FromRgb(r, g, b));
+            brush.Freeze();
+            return brush;
+        }
+
+        /// <summary>
+        /// Die Bildmarke des Kopfbands — dieselbe wie in ElasPrintFlow
+        /// (`public\marke\logo-marke-hell.png`), verkleinert in die exe eingebettet.
+        /// Sie ist kein Wasserzeichen und steht deshalb nicht in der Logo-Auswahl.
+        /// </summary>
+        private static BitmapSource BrandMark()
+        {
+            try
+            {
+                using (Stream s = System.Reflection.Assembly.GetExecutingAssembly()
+                                        .GetManifestResourceStream("Kopfband-Marke.png"))
+                {
+                    if (s == null) return null;
+                    BitmapImage img = new BitmapImage();
+                    img.BeginInit();
+                    img.CacheOption = BitmapCacheOption.OnLoad;
+                    img.StreamSource = s;
+                    img.EndInit();
+                    img.Freeze();
+                    return img;
+                }
+            }
+            catch { return null; }
         }
 
         private UIElement BuildFilePanel()
@@ -602,7 +766,11 @@ namespace Elas3DView
         /// Wäre das Logo im gespeicherten Bild überhaupt zu sehen? Gemessen wird der
         /// Grund genau an der Stelle, an der das Logo liegt.
         /// </summary>
-        private bool LogoWouldVanish(out string detail)
+        /// <param name="likeView">
+        /// Wahr für das Titelbild der Übernahme: Dort liegt hinter dem Logo der
+        /// Hintergrund der Ansicht, nicht der Bildgrund des JPG.
+        /// </param>
+        private bool LogoWouldVanish(bool likeView, out string detail)
         {
             detail = null;
             if (_logoImage == null || _logoImage.Visibility != Visibility.Visible) return false;
@@ -610,28 +778,35 @@ namespace Elas3DView
             if (src == null) return false;
 
             Contrast.Stats logo = Contrast.OfImage(src);
-            Contrast.Stats ground = Contrast.OfBrush(ExportBackground(1.0), ViewAspect(), LogoRegion());
+            Brush behind = likeView ? ViewBackground(1.0) : ExportBackground(1.0);
+            Contrast.Stats ground = Contrast.OfBrush(behind, ViewAspect(), LogoRegion());
             if (!Contrast.WouldVanish(logo, ground)) return false;
 
             detail = "Helligkeit des Logos " + Contrast.Percent(logo.Mean) +
-                     ", des Bildgrunds an dieser Stelle " + Contrast.Percent(ground.Mean) + ".";
+                     (likeView ? ", des Hintergrunds an dieser Stelle " : ", des Bildgrunds an dieser Stelle ") +
+                     Contrast.Percent(ground.Mean) + ".";
             return true;
         }
 
         /// <summary>Fragt einmal nach, solange sich an Logo und Grund nichts ändert.</summary>
-        private bool ContrastOkay()
-        {
-            if (_contrastAccepted) return true;
-            string detail;
-            if (!LogoWouldVanish(out detail)) return true;
+        private bool ContrastOkay() { return ContrastOkay("Trotzdem speichern", false); }
 
+        private bool ContrastOkay(string goText, bool likeView)
+        {
+            // Eine Zusage für das JPG gilt nicht für das Titelbild und umgekehrt:
+            // hinter dem Logo liegt jeweils ein anderer Grund.
+            if (_contrastAccepted && _contrastAcceptedLikeView == likeView) return true;
+            string detail;
+            if (!LogoWouldVanish(likeView, out detail)) return true;
+
+            string groundName = likeView ? "Hintergrund" : "Bildgrund";
             bool go = AppDialog.Confirm(this, "Das Logo wäre nicht zu sehen",
-                "Das gewählte Logo ist nahezu einfarbig und hebt sich vom Bildgrund kaum ab.\n" +
+                "Das gewählte Logo ist nahezu einfarbig und hebt sich vom " + groundName + " kaum ab.\n" +
                 detail + "\n\n" +
                 "Auf hellem Grund braucht es ein dunkles Logo, auf dunklem ein helles — " +
-                "oder den Bildgrund wechseln.",
-                "Trotzdem speichern", false);
-            if (go) _contrastAccepted = true;
+                "oder den " + groundName + " wechseln.",
+                goText, false);
+            if (go) { _contrastAccepted = true; _contrastAcceptedLikeView = likeView; }
             return go;
         }
 
@@ -708,7 +883,11 @@ namespace Elas3DView
             _busyCancel.Margin = new Thickness(0, 13, 0, 0);
             _busyCancel.HorizontalAlignment = HorizontalAlignment.Center;
             _busyCancel.Visibility = Visibility.Collapsed;
-            _busyCancel.Click += delegate { _cancelRequested = true; };
+            _busyCancel.Click += delegate
+            {
+                _cancelRequested = true;
+                if (_pfCancel != null) _pfCancel.Cancel();
+            };
             sp.Children.Add(_busyCancel);
 
             _busy.Child = sp;
@@ -850,6 +1029,7 @@ namespace Elas3DView
         {
             ContextMenu cm = new ContextMenu();
             cm.Items.Add(Item("JPG speichern", "Strg+S", OnSaveJpg));
+            cm.Items.Add(Item("Ins PrintFlow …", "Strg+P", OnSendToPrintFlow));
             cm.Items.Add(Item("Bild / Modell", "B", ToggleImage));
             cm.Items.Add(Item("Umbenennen", "F2", OnRename));
             cm.Items.Add(new Separator());
@@ -863,6 +1043,7 @@ namespace Elas3DView
         {
             ContextMenu cm = new ContextMenu();
             cm.Items.Add(Item("JPG speichern", "Strg+S", OnSaveJpg));
+            cm.Items.Add(Item("Ins PrintFlow …", "Strg+P", OnSendToPrintFlow));
             cm.Items.Add(Item("Umbenennen", "F2", OnRename));
             cm.Items.Add(new Separator());
             cm.Items.Add(Item("Bild / Modell", "B", ToggleImage));
@@ -904,6 +1085,7 @@ namespace Elas3DView
             AddBinding(Key.O, ModifierKeys.Control, OnOpenFile);
             AddBinding(Key.O, ModifierKeys.Control | ModifierKeys.Shift, OnOpenFolder);
             AddBinding(Key.S, ModifierKeys.Control, OnSaveJpg);
+            AddBinding(Key.P, ModifierKeys.Control, OnSendToPrintFlow);
             AddBinding(Key.F2, ModifierKeys.None, OnRename);
             AddBinding(Key.Delete, ModifierKeys.None, OnDelete);
             AddBinding(Key.F5, ModifierKeys.None, delegate { RefreshFolder(_currentFile); RefreshImageFolders(); });
@@ -1818,6 +2000,7 @@ namespace Elas3DView
 
         private async void OnSaveJpg(object sender, RoutedEventArgs e)
         {
+            if (_busyActive) return;
             if (_model == null || _modelFile == null)
             {
                 AppDialog.Info(this, "Kein Modell geladen",
@@ -1889,6 +2072,15 @@ namespace Elas3DView
         /// <summary>Rendert die aktuelle Ansicht abseits des Bildschirms, mit 2× Supersampling.</summary>
         private BitmapSource RenderOffscreen(int width, int height)
         {
+            return RenderOffscreen(width, height, false);
+        }
+
+        /// <param name="likeView">
+        /// Falsch: der Grund aus „Bildgrund" (das JPG, voreingestellt Weiß).
+        /// Wahr: genau der Hintergrund der Ansicht — für das Titelbild der Übernahme.
+        /// </param>
+        private BitmapSource RenderOffscreen(int width, int height, bool likeView)
+        {
             int ss = 2;
             if ((long)width * ss * height * ss > 60000000L) ss = 1;
             int rw = width * ss, rh = height * ss;
@@ -1908,7 +2100,11 @@ namespace Elas3DView
             vp.Children.Add(mv);
 
             Grid host = new Grid();
-            host.Background = ExportBackground(rw / Math.Max(4.0, _viewHost.ActualWidth));
+            // Ohne Fenster (Schalter /dialogbilder) hat die Ansicht keine Breite;
+            // dann gilt die Bildbreite, sonst geriete die Schraffur riesig.
+            double viewWidth = _viewHost.ActualWidth >= 4 ? _viewHost.ActualWidth : width;
+            double bgScale = rw / viewWidth;
+            host.Background = likeView ? ViewBackground(bgScale) : ExportBackground(bgScale);
             host.Children.Add(vp);
 
             // Dasselbe Logo wie in der Ansicht, auf die Breite des Bildes gerechnet.
@@ -1945,6 +2141,7 @@ namespace Elas3DView
 
         private async void OnBatchJpg(object sender, RoutedEventArgs e)
         {
+            if (_busyActive) return;
             // Nur Modelle, auch wenn die Liste gerade Bilder mit anzeigt.
             List<FileEntry> list = new List<FileEntry>();
             foreach (FileEntry entry in _entries) if (!entry.IsImage) list.Add(entry);
@@ -2032,6 +2229,7 @@ namespace Elas3DView
 
         private void OnRename(object sender, RoutedEventArgs e)
         {
+            if (_busyActive) return;      // etwa während eine Datei hochgeladen wird
             if (_currentFile == null || !File.Exists(_currentFile))
             {
                 AppDialog.Info(this, "Kein Modell geladen", "Bitte zuerst eine Datei öffnen.");
@@ -2100,6 +2298,7 @@ namespace Elas3DView
 
         private void OnDelete(object sender, RoutedEventArgs e)
         {
+            if (_busyActive) return;
             if (_currentFile == null || !File.Exists(_currentFile))
             {
                 AppDialog.Info(this, "Kein Modell geladen", "Bitte zuerst eine Datei öffnen.");
@@ -2168,6 +2367,385 @@ namespace Elas3DView
         }
 
         // =================================================================
+        //  Übernahme nach ElasPrintFlow
+        // =================================================================
+
+        /// <summary>
+        /// Ein Knopf für den ganzen Weg: Modell mit Titelbild in ElasPrintFlow
+        /// anlegen, die Ablage dort prüfen und dann — nach Rückfrage — hier
+        /// aufräumen. Gelöscht wird nur, was drüben Byte für Byte nachgewiesen ist;
+        /// bei jedem Fehler davor bleibt auf diesem Rechner alles, wie es war.
+        /// </summary>
+        private async void OnSendToPrintFlow(object sender, RoutedEventArgs e)
+        {
+            if (_busyActive) return;
+            if (_model == null || _modelFile == null || !File.Exists(_modelFile))
+            {
+                AppDialog.Info(this, "Kein Modell geladen", "Bitte zuerst eine STL- oder 3MF-Datei öffnen.");
+                return;
+            }
+            if (_showingImage) ShowModelView();
+
+            string file = _modelFile;
+            long bytes = new FileInfo(file).Length;
+            if (bytes > PrintFlowClient.MaxUpload)
+            {
+                AppDialog.Warn(this, "Datei zu groß",
+                    Path.GetFileName(file) + " hat " + FormatBytes(bytes) + ".\n\n" +
+                    "ElasPrintFlow nimmt in einem Stück höchstens " +
+                    FormatBytes(PrintFlowClient.MaxUpload) + " an.");
+                return;
+            }
+
+            List<string> categories = await ConnectPrintFlow(false, null);
+            if (categories == null) return;
+
+            // Bei einer Million Dreiecken dauert das Bild Sekunden — erst anzeigen, dann rechnen.
+            BitmapSource picture;
+            ShowBusy("Titelbild wird erzeugt …", false);
+            await Task.Delay(1);
+            try { picture = RenderTitle(); }
+            catch (Exception ex)
+            {
+                HideBusy();
+                AppDialog.Error(this, "Titelbild konnte nicht erzeugt werden", ex.Message);
+                return;
+            }
+            HideBusy();
+
+            List<string> marks = new List<string>();
+            marks.Add("Ohne Wasserzeichen");
+            for (int i = 1; i < _cbLogo.Items.Count; i++) marks.Add(Convert.ToString(_cbLogo.Items[i]));
+
+            string name = Path.GetFileNameWithoutExtension(file);
+            string category = _pfCategory;
+
+            while (true)
+            {
+                PrintFlowDialog dlg = new PrintFlowDialog(
+                    Path.GetFileName(file) + "  ·  " + FormatBytes(bytes) + "   →   " + _pfUrl,
+                    _pfUrl + (_pfUser.Length > 0 ? "  ·  angemeldet als " + _pfUser : ""),
+                    name, categories, category, marks, Math.Max(0, _cbLogo.SelectedIndex), picture,
+                    delegate(int mark)
+                    {
+                        if (mark >= 0 && mark < _cbLogo.Items.Count) _cbLogo.SelectedIndex = mark;
+                        return RenderTitle();
+                    });
+                bool accepted = dlg.ShowOver(this);
+                name = dlg.ModelName;
+                category = dlg.Category;
+                picture = dlg.Picture;
+
+                if (dlg.ChangeConnection)
+                {
+                    categories = await ConnectPrintFlow(true, null);
+                    if (categories == null) return;
+                    continue;
+                }
+                if (!accepted) return;
+                if (!ContrastOkay("Trotzdem übernehmen", true)) continue;
+
+                // Vorab fragen, ob es Name und Kategorie schon gibt — sonst reist
+                // die Datei erst hinüber und wird dort abgelehnt.
+                ShowBusy("Name wird geprüft …", false);
+                string taken = null;
+                PrintFlowException problem = null;
+                try { taken = await _pf.FindDuplicate(name, category, System.Threading.CancellationToken.None); }
+                catch (Exception ex) { problem = ex as PrintFlowException ?? new PrintFlowException(ex.Message); }
+                HideBusy();
+
+                if (problem != null && problem.NeedLogin)
+                {
+                    categories = await ConnectPrintFlow(true, "Die Anmeldung ist abgelaufen. Bitte neu anmelden.");
+                    if (categories == null) return;
+                    continue;
+                }
+                if (problem != null)
+                {
+                    AppDialog.Error(this, "ElasPrintFlow", problem.Message);
+                    return;
+                }
+                if (taken != null)
+                {
+                    AppDialog.Warn(this, "Name schon vergeben",
+                        "„" + name + "“ gibt es in der Kategorie „" + category + "“ schon" +
+                        (taken.Length > 0 ? " (Artikelnummer " + taken + ")" : "") + ".\n\n" +
+                        "Bitte einen anderen Namen oder eine andere Kategorie wählen.");
+                    continue;
+                }
+                break;
+            }
+            _pfCategory = category;
+
+            // ---- hinüber ----
+            byte[] png;
+            try { png = EncodePng(picture); }
+            catch (Exception ex)
+            {
+                AppDialog.Error(this, "Titelbild konnte nicht erzeugt werden", ex.Message);
+                return;
+            }
+
+            ShowBusy("Datei wird hochgeladen …", true);
+            _pfCancel = new System.Threading.CancellationTokenSource();
+            bool live = true;
+            Progress<PrintFlowProgress> progress = new Progress<PrintFlowProgress>(delegate(PrintFlowProgress p)
+            {
+                if (!live) return;      // Meldungen kommen nachgereicht; eine späte darf nichts mehr umschreiben
+                BusyText(p.Text);
+                _busyCancel.Visibility = p.CanCancel ? Visibility.Visible : Visibility.Collapsed;
+            });
+
+            PrintFlowModel model = null;
+            Exception failure = null;
+            bool canceled = false;
+            try { model = await _pf.Import(file, name, category, png, progress, _pfCancel.Token); }
+            catch (OperationCanceledException) { canceled = true; }
+            catch (Exception ex) { failure = ex; }
+
+            live = false;
+            _pfCancel.Dispose();
+            _pfCancel = null;
+            HideBusy();
+            SelectInList(_currentFile);
+
+            if (canceled)
+            {
+                Toast("Übernahme abgebrochen — nichts angelegt, nichts gelöscht", false);
+                return;
+            }
+            if (failure != null)
+            {
+                PrintFlowException pfx = failure as PrintFlowException;
+                if (pfx != null && pfx.NeedLogin) _pfSession = "";
+                AppDialog.Error(this, "Übernahme fehlgeschlagen",
+                    failure.Message + "\n\nAuf diesem Rechner ist nichts verändert.");
+                return;
+            }
+
+            FinishTransfer(file, model);
+        }
+
+        /// <summary>
+        /// Stellt die Verbindung her — mit der gemerkten Sitzung, sonst über die
+        /// Anmeldung. Die Kategorienliste ist zugleich die Probe, ob die Sitzung gilt.
+        /// </summary>
+        /// <returns>Die Kategorien; null, wenn der Nutzer abbricht.</returns>
+        private async Task<List<string>> ConnectPrintFlow(bool askFirst, string reason)
+        {
+            while (true)
+            {
+                if (!askFirst && _pfSession.Length > 0)
+                {
+                    if (_pf == null)
+                    {
+                        try { _pf = new PrintFlowClient(_pfUrl, _pfSession); }
+                        catch (PrintFlowException) { _pf = null; }
+                    }
+                    if (_pf != null)
+                    {
+                        ShowBusy("Verbinde mit ElasPrintFlow …", false);
+                        List<string> found = null;
+                        PrintFlowException problem = null;
+                        try { found = await _pf.Categories(System.Threading.CancellationToken.None); }
+                        catch (Exception ex) { problem = ex as PrintFlowException ?? new PrintFlowException(ex.Message); }
+                        HideBusy();
+                        if (found != null) return found;
+
+                        if (problem.NeedLogin)
+                        {
+                            _pfSession = "";
+                            reason = "Die Anmeldung ist abgelaufen. Bitte neu anmelden.";
+                        }
+                        else
+                        {
+                            DlgResult r = AppDialog.Choose(this, "ElasPrintFlow antwortet nicht",
+                                problem.Message + "\n\nLäuft der Server, und stimmt die Adresse?",
+                                "Erneut versuchen", "Verbindung ändern");
+                            if (r == DlgResult.Cancel) return null;
+                            if (r == DlgResult.Ok) continue;
+                            reason = null;
+                        }
+                    }
+                }
+                askFirst = false;
+
+                PrintFlowLoginDialog dlg = new PrintFlowLoginDialog(_pfUrl, _pfUser, reason);
+                if (!dlg.ShowOver(this)) return null;
+
+                if (_pf != null) _pf.Dispose();
+                _pf = dlg.Client;
+                _pfUrl = _pf.BaseUrl;
+                _pfUser = dlg.User;
+                _pfSession = _pf.Session;
+                SaveSettings();         // die Sitzung soll einen Absturz überleben
+                reason = null;
+            }
+        }
+
+        /// <summary>
+        /// Das Titelbild: dieselbe Rechnung wie beim JPG, aber höchstens 1920 px
+        /// breit — es reist als Text in der Anfrage mit und liegt danach als
+        /// Vorschau im Modellordner, nicht als Druckvorlage.
+        ///
+        /// Der Grund ist der HINTERGRUND DER ANSICHT, nicht „Bildgrund" (Tristan,
+        /// 14.11.2026). Bis dahin nahm das Titelbild den Bildgrund des JPG mit —
+        /// voreingestellt Weiß. Wer sich einen dunklen Grund mit dem weißen Logo
+        /// eingerichtet hatte, bekam ein weißes Bild, auf dem das Logo
+        /// verschwand, während der Dialog „so, wie die Ansicht gerade steht"
+        /// versprach. „Bildgrund" gilt weiter für „JPG speichern".
+        /// </summary>
+        private BitmapSource RenderTitle()
+        {
+            int w = Math.Min(TargetWidth(), 1920);
+            int h = (int)Math.Round(w / Math.Max(0.2, ViewAspect()));
+            if (h < 16) h = 16;
+            return RenderOffscreen(w, h, true);
+        }
+
+        /// <summary>PNG, weil ElasPrintFlow das Titelbild unter Name.png ablegt, was immer ankommt.</summary>
+        private static byte[] EncodePng(BitmapSource img)
+        {
+            // Der Grund ist immer deckend; ohne Alphakanal wird die Datei kleiner.
+            FormatConvertedBitmap flat = new FormatConvertedBitmap(img, PixelFormats.Bgr24, null, 0);
+            PngBitmapEncoder enc = new PngBitmapEncoder();
+            enc.Frames.Add(BitmapFrame.Create(flat));
+            using (MemoryStream ms = new MemoryStream())
+            {
+                enc.Save(ms);
+                return ms.ToArray();
+            }
+        }
+
+        /// <summary>Ordner des Modells in Windows-Schreibweise; ElasPrintFlow führt ihn mit Schrägstrichen.</summary>
+        private static string NasFolder(string nasPath)
+        {
+            if (string.IsNullOrEmpty(nasPath)) return null;
+            string p = nasPath.Replace('/', '\\');
+            int cut = p.LastIndexOf('\\');
+            return cut > 2 ? p.Substring(0, cut) : p;
+        }
+
+        internal const string DeleteTitle = "Übernommen — hier löschen?";
+        internal const string DeleteYes = "Endgültig löschen";
+        internal const string DeleteNo = "Behalten";
+
+        /// <summary>Was angelegt wurde: Name, Artikelnummer, Kategorie und der Ordner auf der NAS.</summary>
+        internal static string TransferSummary(PrintFlowModel model)
+        {
+            string head = "„" + model.Name + "“ liegt jetzt in ElasPrintFlow.\n\n" +
+                          "Artikelnummer:  " + (string.IsNullOrEmpty(model.ArticleNumber) ? "–" : model.ArticleNumber) + "\n" +
+                          "Kategorie:  " + model.Category;
+            string folder = NasFolder(model.NasPath);
+            return folder == null ? head : head + "\n" + folder;
+        }
+
+        internal static string DeleteQuestion(PrintFlowModel model, List<string> victims)
+        {
+            string list = "";
+            foreach (string p in victims) list += "\n•  " + Path.GetFileName(p);
+            return TransferSummary(model) + "\n\n" +
+                   "Die Datei auf der NAS stimmt Byte für Byte mit der lokalen überein.\n\n" +
+                   "Von diesem Rechner endgültig löschen:" + list + "\n\n" +
+                   "Das geht am Papierkorb vorbei und lässt sich nicht zurückholen.";
+        }
+
+        /// <summary>
+        /// Für die Prüfung ohne Bildschirm (Schalter /dialogbilder): lädt ein Modell
+        /// und liefert das Titelbild so, wie es an ElasPrintFlow ginge — mit dem
+        /// ersten Logo als Wasserzeichen. Dieselbe Rechnung wie bei der Übernahme.
+        /// </summary>
+        internal BitmapSource ProbeTitle(string modelPath, string pngPath, List<string> marks)
+        {
+            RefreshImageFolders();
+            if (_cbLogo.Items.Count > 1) _cbLogo.SelectedIndex = 1;
+            SetModel(MeshLoader.Load(modelPath), modelPath);
+
+            marks.Add("Ohne Wasserzeichen");
+            for (int i = 1; i < _cbLogo.Items.Count; i++) marks.Add(Convert.ToString(_cbLogo.Items[i]));
+
+            BitmapSource picture = RenderTitle();
+            File.WriteAllBytes(pngPath, EncodePng(picture));
+            return picture;
+        }
+
+        /// <summary>
+        /// Für die Prüfung ohne Bildschirm (Schalter /dialogbilder): das ganze
+        /// Fenster als Bild, ohne es zu zeigen — Kopfband, Leisten und Ansicht.
+        /// </summary>
+        internal void ProbeWindow(string pngPath)
+        {
+            DialogProbe.Save((FrameworkElement)Content, 1340, 820, pngPath);
+        }
+
+        /// <summary>Nach dem Anlegen: berichten, nachfragen, und erst dann lokal löschen.</summary>
+        private void FinishTransfer(string file, PrintFlowModel model)
+        {
+            string number = string.IsNullOrEmpty(model.ArticleNumber) ? "–" : model.ArticleNumber;
+
+            if (!model.Verified)
+            {
+                AppDialog.Warn(this, "Angelegt, aber nicht geprüft",
+                    TransferSummary(model) + "\n\n" + model.VerifyProblem + "\n\n" +
+                    "Die lokalen Dateien bleiben deshalb liegen.");
+                return;
+            }
+
+            List<string> victims = new List<string>();
+            if (File.Exists(file)) victims.Add(file);
+            victims.AddRange(Sidecars(file));
+
+            bool delete = victims.Count > 0 && AppDialog.Ask(this, DlgKind.Success,
+                DeleteTitle, DeleteQuestion(model, victims), DeleteYes, DeleteNo, true);
+            if (!delete)
+            {
+                Toast("Übernommen als " + number + " — lokal behalten", true);
+                return;
+            }
+
+            int index = _fileList.SelectedIndex;
+            int removed = 0;
+            string stuck = null;
+            foreach (string p in victims)
+            {
+                try
+                {
+                    File.Delete(p);
+                    removed++;
+                }
+                catch (Exception ex)
+                {
+                    stuck = Path.GetFileName(p) + "\n\n" + ex.Message;
+                    break;
+                }
+            }
+
+            bool gone = !File.Exists(file);
+            if (gone && string.Equals(_modelFile, file, StringComparison.OrdinalIgnoreCase)) ClearModel();
+            else if (_showingImage && (_currentFile == null || !File.Exists(_currentFile))) ShowModelView();
+            RefreshFolder(null);
+            UpdateImageToggle();
+
+            // Nachbarn auswählen — der nächste Kandidat steht damit schon in der Ansicht.
+            if (gone && _fileList.Items.Count > 0)
+            {
+                if (index >= _fileList.Items.Count) index = _fileList.Items.Count - 1;
+                if (index < 0) index = 0;
+                _fileList.SelectedIndex = index;
+                _fileList.ScrollIntoView(_fileList.SelectedItem);
+            }
+
+            if (stuck != null)
+            {
+                AppDialog.Error(this, "Löschen fehlgeschlagen",
+                    stuck + "\n\nDas Modell liegt trotzdem vollständig in ElasPrintFlow (" + number + ").");
+                return;
+            }
+            Toast("Übernommen als " + number + " — hier gelöscht (" + removed +
+                  (removed == 1 ? " Datei)" : " Dateien)"), true);
+        }
+
+        // =================================================================
         //  Einstellungen
         // =================================================================
 
@@ -2199,6 +2777,10 @@ namespace Elas3DView
                 lines.Add("ortho=" + (_ortho ? "1" : "0"));
                 lines.Add("yaw=" + _yaw.ToString("R", CultureInfo.InvariantCulture));
                 lines.Add("pitch=" + _pitch.ToString("R", CultureInfo.InvariantCulture));
+                lines.Add("pfurl=" + _pfUrl);
+                lines.Add("pfuser=" + _pfUser);
+                lines.Add("pfsession=" + PrintFlowClient.Protect(_pfSession));
+                lines.Add("pfcat=" + _pfCategory);
 
                 string recent = "";
                 foreach (Color c in ColorPickerButton.Recent)
@@ -2270,6 +2852,10 @@ namespace Elas3DView
                         case "pitch":
                             if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out dv)) _pitch = dv;
                             break;
+                        case "pfurl": if (v.Length > 0) _pfUrl = v; break;
+                        case "pfuser": _pfUser = v; break;
+                        case "pfsession": _pfSession = PrintFlowClient.Unprotect(v); break;
+                        case "pfcat": _pfCategory = v; break;
                         case "recent":
                             ColorPickerButton.Recent.Clear();
                             foreach (string hex in v.Split(','))

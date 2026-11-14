@@ -179,9 +179,57 @@ zeigt eine Rückfrage genau auf, was verschwindet. Alles wandert in den
 **Papierkorb** und lässt sich von dort zurückholen — nichts wird endgültig
 gelöscht. Danach rückt der nächste Eintrag der Liste nach.
 
+### Ins PrintFlow übernehmen
+
+**Ins PrintFlow …** (Strg+P) legt das geladene Modell in ElasPrintFlow an und
+räumt es danach von diesem Rechner. Ein Knopf für den ganzen Weg:
+
+1. **Anmelden** — nur beim ersten Mal und wenn die Sitzung abgelaufen ist
+   (ElasPrintFlow hält sie sieben Tage). Gemerkt werden Adresse, Benutzername
+   und die Sitzung, **nie das Passwort**. Die Sitzung liegt verschlüsselt in den
+   Einstellungen und ist nur für dieses Windows-Konto lesbar.
+2. **Angaben** — Name (vorbelegt aus dem Dateinamen), Kategorie aus der Liste
+   von ElasPrintFlow und das **Wasserzeichen**: eines der Logos oder keines. Der
+   Dialog zeigt das Titelbild genau so, wie es hinausgeht — die Ansicht, wie sie
+   gerade steht, **mit ihrem Hintergrund**, höchstens 1920 px breit. *Bildgrund*
+   gilt hier nicht: Der steht für *JPG speichern*, das Titelbild nimmt immer,
+   was hinter dem Modell zu sehen ist. Die Rückfrage, ob das Logo zu sehen
+   wäre, misst deshalb ebenfalls den Hintergrund der Ansicht.
+3. **Übernahme** — die Datei wird hochgeladen; ElasPrintFlow verschiebt sie nach
+   `<Kategorie>\<Name>\` auf der NAS, legt das Titelbild daneben und vergibt die
+   Artikelnummer.
+4. **Prüfung** — die abgelegte Datei wird zurückgelesen und **Byte für Byte**
+   mit der lokalen verglichen.
+5. **Rückfrage** — erst jetzt, mit Artikelnummer und Ablageort: *Endgültig
+   löschen* oder *Behalten*. Gelöscht werden die Modelldatei und ein
+   gleichnamiges Bild daneben, **am Papierkorb vorbei** — der Sinn ist, dass die
+   Platte frei wird und das Modell nur noch auf der NAS liegt. Der Ordner bleibt.
+
+Was dabei nicht passieren kann: Scheitert irgendein Schritt, oder stimmt der
+Vergleich nicht, kommt die Löschfrage gar nicht erst. Auf dem Rechner bleibt
+dann alles, wie es war.
+
+Grenzen der ersten Fassung:
+
+* Ein Modell ist eine Datei. Mehrere Dateien zu einem Modell zusammenfassen kann
+  der ElasSTLsortierer.
+* Höchstens 300 MB je Datei — mehr nimmt ElasPrintFlow in einem Stück nicht an.
+* Ein schon vorhandenes JPG neben dem Modell wird nicht mit hochgeladen; das
+  Titelbild entsteht bei der Übernahme neu. Gelöscht wird das JPG trotzdem mit.
+* Gibt es den Namen in der Kategorie schon, wird vor dem Hochladen abgelehnt.
+  Groß- und Kleinschreibung zählen dabei nicht: auf der Freigabe wäre es
+  derselbe Ordner.
+
 ### Design
 
-Rechts oben schaltet **Helles Design / Dunkles Design** um. Die Wahl wird
+Oben liegt das **Kopfband**, wie ElasPrintFlow es trägt: Bildmarke, der Name in
+zwei Gewichten — „Elas" leicht, „3DView" fett, ohne Lücke —, darunter der
+Leitsatz, unten eine Goldlinie, die an beiden Enden ausläuft. Maße und Farben
+stehen wörtlich in `Titelleiste.tsx` von ElasPrintFlow. Das Band bleibt dunkel,
+auch im hellen Design; die Bildmarke liegt als `assets\Kopfband-Marke.png` in
+der exe und ist kein Wasserzeichen.
+
+Rechts im Kopfband schaltet **Helles Design / Dunkles Design** um. Die Wahl wird
 gemerkt, die Fensterleiste zieht mit.
 
 ### Tastenkürzel
@@ -190,6 +238,7 @@ gemerkt, die Fensterleiste zieht mit.
 |---|---|
 | Strg+O / Strg+Umschalt+O | Datei / Ordner öffnen |
 | Strg+S | JPG speichern |
+| Strg+P | Ins PrintFlow übernehmen |
 | B | zwischen Modell und Vorschaubild wechseln |
 | F2 | Umbenennen |
 | Entf | Löschen (Papierkorb) |
@@ -209,6 +258,11 @@ Das Werkzeug ist auf die Konventionen der Werkbank abgestimmt:
   STL liegt, *ist* die Galerie des Modells. Ein hier erzeugtes JPG taucht dort
   also ohne weiteres Zutun als Kachel auf.
 * **Produktbilder auf Weiß**, siehe oben.
+* **Die Übernahme geht durch ElasPrintFlow, nicht an ihm vorbei.** Dieselben
+  drei Aufrufe wie die Weboberfläche und der ElasSTLsortierer
+  (`hochladen-lokal`, `scan-legacy`, `execute-batch-import`). Die Artikelnummer
+  entsteht aus der laufenden Modell-ID; nur ElasPrintFlow kann sie vergeben.
+  Direkt auf die Freigabe zu schreiben ergäbe Dateien, die dort niemand kennt.
 * **Löschen greift nur die zugeordneten Dateien an**, nie den Ordner. In
   Sammelordnern wie `…\Etsy\Bestellung Nr. …\` liegen hunderte Dateien
   nebeneinander; ein Ordnerlöschen hätte dort ganze Bestellungen abgeräumt.
@@ -310,6 +364,16 @@ JPG-Exports. Echte Modelle lassen sich mitgeben:
 powershell -ExecutionPolicy Bypass -File run-tests.ps1 "C:\Pfad\grosses-modell.stl"
 ```
 
+Die Dialoge der Übernahme lassen sich ohne Bildschirm prüfen. Der versteckte
+Schalter lädt ein Modell, zeichnet das Titelbild so, wie es an ElasPrintFlow
+ginge, und legt es mit den Dialogen als PNG ab — nichts erscheint, nichts geht
+ins Netz. Aus PowerShell aufrufen; die Git-Bash verbiegt `/dialogbilder` zu
+einem Pfad, und dann startet das Programm ganz normal.
+
+```powershell
+bin\Elas3DView.exe /dialogbilder "C:\Pfad\modell.stl" "C:\Pfad\zielordner"
+```
+
 ---
 
 ## Aufbau
@@ -323,6 +387,8 @@ src\AppDialog.cs     Popups für Meldungen und Rückfragen
 src\ColorPicker.cs   Farbpalette mit freier Farbwahl
 src\MainWindow.cs    Oberfläche, Kamera, Beleuchtung, JPG, Umbenennen, Löschen
 src\Dialogs.cs       Umbenennen-Dialog und Programmeinstieg
+src\PrintFlow.cs     Übergabe an ElasPrintFlow: Anmeldung, Hochladen, Anlegen, Byte-Vergleich
+src\PrintFlowDialogs.cs  Anmeldung und Übernahme-Dialog, Prüfung ohne Bildschirm
 tests\SelfTest.cs    Testfälle samt Erzeugung der Testmodelle
 tests\UiShot.cs      startet das echte Fenster und prüft Design und JPG-Schalter
 build.ps1            Symbol erzeugen und kompilieren
@@ -330,7 +396,9 @@ build.ps1            Symbol erzeugen und kompilieren
 
 Einstellungen (Ordner, Listenart, Design, Farbe, Oberfläche, Hintergrund samt
 eigenem Bild, Bildgrund, JPG-Breite, Logo mit Größe und Position, Blickrichtung,
-zuletzt benutzte Farben) liegen in `%APPDATA%\Elas3DView\settings.txt`.
+zuletzt benutzte Farben, dazu Adresse, Benutzername, verschlüsselte Sitzung und
+zuletzt gewählte Kategorie für ElasPrintFlow) liegen in
+`%APPDATA%\Elas3DView\settings.txt`.
 
 Die mitgelieferten Logos liegen als Ressource in der exe und stammen aus
 `assets\`; `build.ps1` bettet jede Datei dieses Ordners automatisch ein.

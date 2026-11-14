@@ -267,6 +267,38 @@ namespace Elas3DView
     <Setter Property='Foreground' Value='{DynamicResource Negative}'/>
   </Style>
 
+  <!-- Pille im Kopfband, nach ElasPrintFlow (Titelleiste.tsx: 44 px hoch, 13 px
+       Schrift, Kante #2A2430 auf #1B1721). Feste Farben statt Palette: Das Band
+       bleibt dunkel, auch im hellen Design. -->
+  <Style x:Key='BtnBand' TargetType='Button'>
+    <Setter Property='Foreground' Value='#CFC2BC'/>
+    <Setter Property='FontFamily' Value='Segoe UI Variable Text, Segoe UI'/>
+    <Setter Property='FontSize' Value='13'/>
+    <Setter Property='Height' Value='44'/>
+    <Setter Property='Padding' Value='18,0,18,0'/>
+    <Setter Property='SnapsToDevicePixels' Value='True'/>
+    <Setter Property='Template'>
+      <Setter.Value>
+        <ControlTemplate TargetType='Button'>
+          <Border x:Name='b' CornerRadius='22' Background='#1B1721'
+                  BorderBrush='#2A2430' BorderThickness='1'
+                  Padding='{TemplateBinding Padding}'>
+            <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property='IsMouseOver' Value='True'>
+              <Setter TargetName='b' Property='BorderBrush' Value='#8CD39A39'/>
+              <Setter Property='Foreground' Value='#F0D6A6'/>
+            </Trigger>
+            <Trigger Property='IsPressed' Value='True'>
+              <Setter TargetName='b' Property='Background' Value='#241F2C'/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
   <Style x:Key='BtnChip' TargetType='Button' BasedOn='{StaticResource Btn}'>
     <Setter Property='Padding' Value='11,4,11,4'/>
     <Setter Property='Margin' Value='0,0,4,0'/>
@@ -320,6 +352,32 @@ namespace Elas3DView
     <Setter Property='Template'>
       <Setter.Value>
         <ControlTemplate TargetType='TextBox'>
+          <Border x:Name='b' CornerRadius='9' Background='{TemplateBinding Background}'
+                  BorderBrush='{DynamicResource Border}' BorderThickness='1'>
+            <ScrollViewer x:Name='PART_ContentHost' Margin='{TemplateBinding Padding}'/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property='IsFocused' Value='True'>
+              <Setter TargetName='b' Property='BorderBrush' Value='{DynamicResource Gold}'/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- Dasselbe Feld für Passwörter; PasswordBox erbt nicht von TextBox. -->
+  <Style x:Key='Pwd' TargetType='PasswordBox'>
+    <Setter Property='Foreground' Value='{DynamicResource Text}'/>
+    <Setter Property='Background' Value='{DynamicResource Input}'/>
+    <Setter Property='CaretBrush' Value='{DynamicResource Gold}'/>
+    <Setter Property='SelectionBrush' Value='{DynamicResource Gold}'/>
+    <Setter Property='FontFamily' Value='Segoe UI Variable Text, Segoe UI'/>
+    <Setter Property='FontSize' Value='14'/>
+    <Setter Property='Padding' Value='9,7,9,7'/>
+    <Setter Property='Template'>
+      <Setter.Value>
+        <ControlTemplate TargetType='PasswordBox'>
           <Border x:Name='b' CornerRadius='9' Background='{TemplateBinding Background}'
                   BorderBrush='{DynamicResource Border}' BorderThickness='1'>
             <ScrollViewer x:Name='PART_ContentHost' Margin='{TemplateBinding Padding}'/>

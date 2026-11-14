@@ -17,8 +17,9 @@ namespace Elas3DView
     ///     goldene Kante und Schriftgewicht
     ///   * Radien 8–12 px, Pillen 999 px
     ///
-    /// Manrope und Cormorant Garamond sind auf diesem Rechner nicht vorhanden;
-    /// an ihrer Stelle stehen Segoe UI und — für Zahlen — Constantia, das als
+    /// Manrope und Cormorant Garamond sind seit dem 14.11.2026 eingebettet, aber
+    /// nur in den Schnitten des Kopfbands (BrandFonts.cs). Für die übrige
+    /// Oberfläche stehen weiter Segoe UI und — für Zahlen — Constantia, das als
     /// einzige mitgelieferte Serifenschrift Mediävalziffern mitbringt.
     /// </summary>
     public static class Theme

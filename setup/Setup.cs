@@ -209,7 +209,8 @@ namespace Elas3DSetup
             using (RegistryKey k = Registry.CurrentUser.CreateSubKey(Programm.UninstKey))
             {
                 k.SetValue("DisplayName", Programm.AppName);
-                k.SetValue("DisplayVersion", Stand.Anzeige);
+                k.SetValue("DisplayVersion", Stand.Fassung);
+                k.SetValue("ElasStand", Stand.Anzeige);      // welcher Commit genau
                 k.SetValue("Publisher", "Elas3DStudio");
                 k.SetValue("DisplayIcon", exe + ",0");
                 k.SetValue("InstallLocation", ziel);
@@ -588,7 +589,7 @@ namespace Elas3DSetup
             };
             Label unter = new Label
             {
-                Text = "STL- und 3MF-Betrachter  ·  Stand " + Stand.Datum,
+                Text = "STL- und 3MF-Betrachter  ·  Version " + Stand.Fassung + " vom " + Stand.Datum,
                 ForeColor = Leise,
                 AutoSize = true,
                 Location = new Point(91, 54)

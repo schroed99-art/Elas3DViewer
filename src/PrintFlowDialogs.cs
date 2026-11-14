@@ -458,6 +458,7 @@ namespace Elas3DView
                     .SavePicture(Path.Combine(dir, "3-uebernahme.png"), null);
 
                 PrintFlowModel model = new PrintFlowModel();
+                model.Id = 2743;
                 model.Name = Path.GetFileNameWithoutExtension(modelPath);
                 model.Category = "Vasen";
                 model.ArticleNumber = "VA-0000024";
@@ -468,7 +469,10 @@ namespace Elas3DView
                 victims.Add(model.Name + ".jpg");
                 AppDialog.SavePicture(Path.Combine(dir, "4-loeschfrage.png"), DlgKind.Success,
                     MainWindow.DeleteTitle, MainWindow.DeleteQuestion(model, victims),
-                    MainWindow.DeleteYes, MainWindow.DeleteNo, true);
+                    MainWindow.DeleteYes, MainWindow.DeleteNo, true,
+                    MainWindow.TransferLinks(model, PrintFlowClient.DefaultUrl));
+
+                new ReleaseNotesDialog().SavePicture(Path.Combine(dir, "7-neuerungen.png"), null);
 
                 // Das Hauptfenster selbst, in beiden Designs — für Kopfband und Leisten.
                 // Für das helle ein ZWEITES Fenster: Ein nie gezeigtes Fenster lässt

@@ -242,8 +242,8 @@ namespace Elas3DView
         /// helle Fassung, und drüben ist das Band ebenfalls nicht Teil des Themas.
         /// Deshalb stehen hier feste Farben und keine Verweise auf die Palette.
         ///
-        /// Manrope und Cormorant Garamond stehen vorn in der Schriftliste; sind sie
-        /// nicht installiert, greifen Segoe UI und Constantia (siehe Theme.cs).
+        /// Manrope und Cormorant Garamond sind in die exe eingebettet (BrandFonts.cs);
+        /// lassen sie sich nicht laden, greifen Segoe UI und Constantia.
         /// </summary>
         private UIElement BuildBrandBand()
         {
@@ -307,26 +307,30 @@ namespace Elas3DView
             DockPanel.SetDock(words, Dock.Left);
             row.Children.Add(words);
 
-            TextBlock name = new TextBlock();
-            name.FontFamily = new FontFamily("Manrope, Segoe UI Variable Display, Segoe UI");
-            name.FontSize = 26;
-            name.LineHeight = 29;
-            name.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
-            name.Foreground = FixedBrush(0xFB, 0xF4, 0xEE);
-            System.Windows.Documents.Run thin = new System.Windows.Documents.Run("Elas");
-            thin.FontWeight = FontWeights.Light;
-            System.Windows.Documents.Run bold = new System.Windows.Documents.Run("3DView");
-            bold.FontWeight = FontWeights.Bold;
-            name.Inlines.Add(thin);
-            name.Inlines.Add(bold);
+            // Der Name wörtlich wie drüben: Manrope 26 px in zwei Gewichten,
+            // Laufweite −0,025 Geviert, Zeilenhöhe 1,1. Die Schriften sind
+            // eingebettet (BrandFonts.cs). Stehen sie nicht bereit, greifen Segoe UI
+            // und Constantia — dann ohne die enge Laufweite und mit kleinerem
+            // Leitsatz, denn beide laufen breiter als die Hausschriften.
+            bool brand = BrandFonts.Ready;
+            FontFamily sans = BrandFonts.Sans();
+            TrackedWord name = new TrackedWord(26, brand ? -0.025 : 0, 28.6, FixedBrush(0xFB, 0xF4, 0xEE));
+            name.Add("Elas", sans, FontWeights.Light);
+            name.Add("3DView", sans, FontWeights.Bold);
+            name.HorizontalAlignment = HorizontalAlignment.Left;
             words.Children.Add(name);
 
             TextBlock motto = new TextBlock();
             motto.Text = "Vom Modell zum Vorschaubild";
-            motto.FontFamily = new FontFamily("Cormorant Garamond, Constantia, Georgia");
+            motto.FontFamily = BrandFonts.Serif();
             motto.FontStyle = FontStyles.Italic;
-            motto.FontSize = 15.5;
-            motto.Margin = new Thickness(1, 4, 0, 0);
+            motto.FontSize = brand ? 17 : 15.5;
+            if (brand)
+            {
+                motto.LineHeight = 22;      // 17 px × 1,3
+                motto.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+            }
+            motto.Margin = new Thickness(brand ? 0 : 1, 4, 0, 0);
             motto.Foreground = FixedBrush(0xC9, 0xA9, 0x8C);
             words.Children.Add(motto);
 
@@ -334,6 +338,15 @@ namespace Elas3DView
             _themeBtn.VerticalAlignment = VerticalAlignment.Center;
             DockPanel.SetDock(_themeBtn, Dock.Right);
             row.Children.Add(_themeBtn);
+
+            // Die Fassung steht oben, wo man sie nicht suchen muss — nach einem
+            // Setup zeigt ein Blick, ob wirklich das Neue läuft.
+            Button version = Styled("BtnBand", "v" + AppVersion.Current,
+                "Version " + AppVersion.Current + " — zeigen, was sich geändert hat", OnShowNotes);
+            version.VerticalAlignment = VerticalAlignment.Center;
+            version.Margin = new Thickness(0, 0, 10, 0);
+            DockPanel.SetDock(version, Dock.Right);
+            row.Children.Add(version);
 
             // Die Abschlusslinie läuft an beiden Enden aus — eine durchgezogene
             // Kante schnitte das Band vom Rest ab, statt es abzuschließen.
@@ -353,6 +366,11 @@ namespace Elas3DView
             band.Children.Add(line);
 
             return band;
+        }
+
+        private void OnShowNotes(object sender, RoutedEventArgs e)
+        {
+            new ReleaseNotesDialog().ShowOver(this);
         }
 
         private static SolidColorBrush FixedBrush(byte r, byte g, byte b)
@@ -2651,6 +2669,39 @@ namespace Elas3DView
         }
 
         /// <summary>
+        /// Was sich in der Zusammenfassung anklicken lässt (Tristan, 14.11.2026:
+        /// „einen Link, um direkt dorthin zu springen"): Der Ablageort öffnet den
+        /// Ordner auf der NAS im Explorer, die Datei darin markiert; die
+        /// Artikelnummer öffnet das Modell in ElasPrintFlow.
+        /// </summary>
+        internal static DlgLink[] TransferLinks(PrintFlowModel model, string baseUrl)
+        {
+            List<DlgLink> links = new List<DlgLink>();
+
+            if (model.Id > 0 && !string.IsNullOrEmpty(model.ArticleNumber) && !string.IsNullOrEmpty(baseUrl))
+            {
+                string page = baseUrl.TrimEnd('/') + "/model-manager/inventory/" + model.Id;
+                links.Add(new DlgLink(model.ArticleNumber, "Modell in ElasPrintFlow öffnen: " + page,
+                    delegate { Process.Start(page); }));
+            }
+
+            string folder = NasFolder(model.NasPath);
+            if (folder != null)
+            {
+                string file = model.NasPath.Replace('/', Path.DirectorySeparatorChar);
+                links.Add(new DlgLink(folder, "Ordner auf der NAS im Explorer öffnen",
+                    delegate
+                    {
+                        if (File.Exists(file)) Process.Start("explorer.exe", "/select," + Quoted(file));
+                        else Process.Start("explorer.exe", Quoted(folder));
+                    }));
+            }
+            return links.ToArray();
+        }
+
+        private static string Quoted(string path) { return (char)34 + path + (char)34; }
+
+        /// <summary>
         /// Für die Prüfung ohne Bildschirm (Schalter /dialogbilder): lädt ein Modell
         /// und liefert das Titelbild so, wie es an ElasPrintFlow ginge — mit dem
         /// ersten Logo als Wasserzeichen. Dieselbe Rechnung wie bei der Übernahme.
@@ -2682,12 +2733,13 @@ namespace Elas3DView
         private void FinishTransfer(string file, PrintFlowModel model)
         {
             string number = string.IsNullOrEmpty(model.ArticleNumber) ? "–" : model.ArticleNumber;
+            DlgLink[] links = TransferLinks(model, _pfUrl);
 
             if (!model.Verified)
             {
                 AppDialog.Warn(this, "Angelegt, aber nicht geprüft",
                     TransferSummary(model) + "\n\n" + model.VerifyProblem + "\n\n" +
-                    "Die lokalen Dateien bleiben deshalb liegen.");
+                    "Die lokalen Dateien bleiben deshalb liegen.", links);
                 return;
             }
 
@@ -2696,7 +2748,7 @@ namespace Elas3DView
             victims.AddRange(Sidecars(file));
 
             bool delete = victims.Count > 0 && AppDialog.Ask(this, DlgKind.Success,
-                DeleteTitle, DeleteQuestion(model, victims), DeleteYes, DeleteNo, true);
+                DeleteTitle, DeleteQuestion(model, victims), DeleteYes, DeleteNo, true, links);
             if (!delete)
             {
                 Toast("Übernommen als " + number + " — lokal behalten", true);

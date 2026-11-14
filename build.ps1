@@ -182,6 +182,17 @@ if (Test-Path $assetDir) {
     # Darunter auch die Bildmarke des Kopfbands — sie ist kein Wasserzeichen und
     # wird nicht nach bin\logos geschrieben (welche das sind, steht in Logo.cs).
     Write-Host ('Eingebettet: ' + $resources.Count + ' Bild(er)') -ForegroundColor DarkGray
+
+    # Die Hausschriften (Manrope, Cormorant Garamond) für das Kopfband. Nur die
+    # .ttf — die Lizenztexte daneben gehören ins Repository, nicht in die exe;
+    # die Schriftdateien tragen ihre Lizenzangabe selbst. Geladen werden sie in
+    # src\BrandFonts.cs unter genau diesen Namen.
+    $fontDir = Join-Path $assetDir 'schriften'
+    if (Test-Path $fontDir) {
+        $fonts = @(Get-ChildItem -Path $fontDir -Filter *.ttf -File)
+        foreach ($f in $fonts) { $resources += ('/resource:' + $f.FullName + ',' + $f.Name) }
+        Write-Host ('Eingebettet: ' + $fonts.Count + ' Schrift(en)') -ForegroundColor DarkGray
+    }
 }
 
 Write-Host 'Kompiliere ...' -ForegroundColor DarkGray

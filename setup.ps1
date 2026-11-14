@@ -35,7 +35,14 @@ try {
     }
 } catch { }
 $anzeige = $datum.ToString('yyyy.MM.dd') + ' (' + $commit + ')'
-$version = $datum.Year.ToString() + '.' + $datum.Month + '.' + $datum.Day + '.0'
+
+# Die Fassung hat eine Quelle: src\Version.cs. Das Setup liest sie dort heraus,
+# statt eine zweite Zahl zu fuehren, die irgendwann abweicht.
+$fassung = $null
+$treffer = Select-String -LiteralPath (Join-Path $root 'src\Version.cs') -Pattern 'const string Current = "(\d+\.\d+\.\d+)"'
+if ($treffer) { $fassung = $treffer.Matches[0].Groups[1].Value }
+if (-not $fassung) { throw 'In src\Version.cs steht keine Fassung (const string Current = "x.y.z").' }
+$version = $fassung + '.0'
 
 $gen = Join-Path $env:TEMP ('Elas3DSetup-Stand-' + [guid]::NewGuid().ToString('N') + '.cs')
 @"
@@ -49,6 +56,7 @@ namespace Elas3DSetup
 {
     internal static class Stand
     {
+        public const string Fassung = "$fassung";
         public const string Datum = "$($datum.ToString('dd.MM.yyyy'))";
         public const string Anzeige = "$anzeige";
     }
@@ -98,4 +106,4 @@ if ($code -ne 0 -or -not (Test-Path $out)) {
 
 $size = [Math]::Round((Get-Item $out).Length / 1KB, 1)
 Write-Host ''
-Write-Host ('Fertig: ' + $out + '  (' + $size + ' kB, Stand ' + $anzeige + ')') -ForegroundColor Green
+Write-Host ('Fertig: ' + $out + '  (' + $size + ' kB, Version ' + $fassung + ', Stand ' + $anzeige + ')') -ForegroundColor Green

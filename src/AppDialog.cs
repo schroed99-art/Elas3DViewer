@@ -9,6 +9,24 @@ namespace Elas3DView
 {
     public enum DlgKind { Info, Success, Warn, Error, Question }
 
+    /// <summary>
+    /// Ein Stück des Meldungstexts, das sich anklicken lässt — etwa ein Ablageort,
+    /// der sich im Explorer öffnet. Der Text muss wörtlich in der Meldung stehen.
+    /// </summary>
+    public class DlgLink
+    {
+        public readonly string Text;
+        public readonly string Tip;
+        public readonly Action Click;
+
+        public DlgLink(string text, string tip, Action click)
+        {
+            Text = text;
+            Tip = tip;
+            Click = click;
+        }
+    }
+
     /// <summary>Mittlere Schaltfläche eines dreiteiligen Dialogs.</summary>
     public enum DlgResult { Ok, Alt, Cancel }
 
@@ -22,7 +40,8 @@ namespace Elas3DView
         private DlgResult _result = DlgResult.Cancel;
 
         private AppDialog(Window owner, DlgKind kind, string title, string message,
-                          string okText, string altText, string cancelText, bool danger)
+                          string okText, string altText, string cancelText, bool danger,
+                          DlgLink[] links)
         {
             Title = title;                 // ohne Rahmen nicht sichtbar, aber identifizierbar
             WindowStyle = WindowStyle.None;
@@ -65,7 +84,7 @@ namespace Elas3DView
             root.Children.Add(head);
 
             TextBlock body = new TextBlock();
-            body.Text = message;
+            Fill(body, message, links);
             body.FontSize = 13;
             body.LineHeight = 20;
             body.TextAlignment = TextAlignment.Center;
@@ -88,6 +107,51 @@ namespace Elas3DView
             {
                 if (e.Key == Key.Escape) { _result = DlgResult.Cancel; Close(); e.Handled = true; }
             };
+        }
+
+        /// <summary>
+        /// Setzt den Text und macht anklickbar, was als Link gemeldet ist — jeweils
+        /// die erste Fundstelle. Das Fenster bleibt dabei offen: Ein Link zeigt
+        /// etwas, entschieden wird weiter über die Schaltflächen. Die Links nehmen
+        /// keinen Tastaturfokus; die Eingabetaste gehört der Hauptschaltfläche.
+        /// </summary>
+        private static void Fill(TextBlock body, string message, DlgLink[] links)
+        {
+            if (links == null || links.Length == 0) { body.Text = message; return; }
+
+            bool[] used = new bool[links.Length];
+            int pos = 0;
+            while (pos < message.Length)
+            {
+                int at = -1, which = -1;
+                for (int i = 0; i < links.Length; i++)
+                {
+                    if (used[i] || links[i] == null || string.IsNullOrEmpty(links[i].Text)) continue;
+                    int found = message.IndexOf(links[i].Text, pos, StringComparison.Ordinal);
+                    if (found >= 0 && (at < 0 || found < at)) { at = found; which = i; }
+                }
+                if (which < 0) break;
+
+                if (at > pos)
+                    body.Inlines.Add(new System.Windows.Documents.Run(message.Substring(pos, at - pos)));
+
+                DlgLink link = links[which];
+                used[which] = true;
+                System.Windows.Documents.Hyperlink h = new System.Windows.Documents.Hyperlink(
+                    new System.Windows.Documents.Run(link.Text));
+                h.Foreground = Brush("GoldText");
+                h.Focusable = false;
+                if (link.Tip != null) h.ToolTip = link.Tip;
+                h.Click += delegate
+                {
+                    try { link.Click(); }
+                    catch (Exception ex) { h.ToolTip = "Das ließ sich nicht öffnen: " + ex.Message; }
+                };
+                body.Inlines.Add(h);
+                pos = at + link.Text.Length;
+            }
+            if (pos < message.Length)
+                body.Inlines.Add(new System.Windows.Documents.Run(message.Substring(pos)));
         }
 
         private Button MakeButton(string text, DlgResult result, bool primary, bool danger)
@@ -154,22 +218,24 @@ namespace Elas3DView
 
         /// <summary>Für die Prüfung ohne Bildschirm: zeichnet eine Meldung in eine Datei, ohne sie zu zeigen.</summary>
         internal static void SavePicture(string path, DlgKind kind, string title, string message,
-                                         string okText, string cancelText, bool danger)
+                                         string okText, string cancelText, bool danger,
+                                         DlgLink[] links = null)
         {
-            AppDialog d = new AppDialog(null, kind, title, message, okText, null, cancelText, danger);
+            AppDialog d = new AppDialog(null, kind, title, message, okText, null, cancelText, danger, links);
             DialogProbe.Save((FrameworkElement)d.Content, d.Width, path);
         }
 
         // -------------------------------------------------------- Aufrufhilfen
 
         private static DlgResult Run(Window owner, DlgKind kind, string title, string message,
-                                     string ok, string alt, string cancel, bool danger)
+                                     string ok, string alt, string cancel, bool danger,
+                                     DlgLink[] links = null)
         {
             MainWindow mw = owner as MainWindow;
             if (mw != null) mw.SetScrim(true);
             try
             {
-                AppDialog d = new AppDialog(owner, kind, title, message, ok, alt, cancel, danger);
+                AppDialog d = new AppDialog(owner, kind, title, message, ok, alt, cancel, danger, links);
                 d.ShowDialog();
                 return d._result;
             }
@@ -189,9 +255,9 @@ namespace Elas3DView
             Run(owner, DlgKind.Success, title, message, "OK", null, null, false);
         }
 
-        public static void Warn(Window owner, string title, string message)
+        public static void Warn(Window owner, string title, string message, DlgLink[] links = null)
         {
-            Run(owner, DlgKind.Warn, title, message, "OK", null, null, false);
+            Run(owner, DlgKind.Warn, title, message, "OK", null, null, false, links);
         }
 
         public static void Error(Window owner, string title, string message)
@@ -211,9 +277,9 @@ namespace Elas3DView
         /// „Behalten" statt „Abbrechen", wenn die eigentliche Arbeit schon getan ist.
         /// </summary>
         public static bool Ask(Window owner, DlgKind kind, string title, string message,
-                               string okText, string cancelText, bool danger)
+                               string okText, string cancelText, bool danger, DlgLink[] links = null)
         {
-            return Run(owner, kind, title, message, okText, null, cancelText, danger) == DlgResult.Ok;
+            return Run(owner, kind, title, message, okText, null, cancelText, danger, links) == DlgResult.Ok;
         }
 
         /// <summary>Rückfrage mit drei Wegen, etwa Überschreiben / Danebenlegen / Abbrechen.</summary>

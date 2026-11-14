@@ -204,6 +204,9 @@ räumt es danach von diesem Rechner. Ein Knopf für den ganzen Weg:
    löschen* oder *Behalten*. Gelöscht werden die Modelldatei und ein
    gleichnamiges Bild daneben, **am Papierkorb vorbei** — der Sinn ist, dass die
    Platte frei wird und das Modell nur noch auf der NAS liegt. Der Ordner bleibt.
+   In diesem Fenster sind **Artikelnummer und Ablageort Links**: Die Nummer
+   öffnet das Modell in ElasPrintFlow, der Pfad den Ordner auf der NAS im
+   Explorer. Das Fenster bleibt dabei offen.
 
 Was dabei nicht passieren kann: Scheitert irgendein Schritt, oder stimmt der
 Vergleich nicht, kommt die Löschfrage gar nicht erst. Auf dem Rechner bleibt
@@ -231,6 +234,20 @@ der exe und ist kein Wasserzeichen.
 
 Rechts im Kopfband schaltet **Helles Design / Dunkles Design** um. Die Wahl wird
 gemerkt, die Fensterleiste zieht mit.
+
+### Version und Neuerungen
+
+Links daneben steht die **Version** (etwa `v1.3.0`). Nach einem Setup zeigt ein
+Blick, ob wirklich das Neue läuft. Ein Klick darauf öffnet die **Neuerungen**:
+jede Fassung mit Datum und dem, was sie für die Bedienung gebracht hat, die
+neueste oben.
+
+Zahl und Liste stehen an einer Stelle, `src\Version.cs`. Dieselbe Zahl tragen
+die Dateieigenschaften der exe, das Setup und der Eintrag unter *Installierte
+Apps*; `setup.ps1` liest sie dort heraus. **Bei jeder Änderung** wird sie
+hochgezählt (gezählt wie in ElasPrintFlow: MAJOR Umbau, MINOR neue Fähigkeit,
+PATCH Behebung oder Gestaltung) und bekommt oben in der Liste ihren Eintrag —
+geschrieben für den, der das Programm benutzt.
 
 ### Tastenkürzel
 
@@ -286,11 +303,24 @@ Regeln des Handoffs:
 Der aktive Eintrag der Dateiliste trägt die 2 px starke Goldkante links, wie die
 Seitenleiste der Werkbank. Die Vorschaufläche ist schraffiert.
 
-**Abweichung:** Manrope und Cormorant Garamond sind auf diesem Rechner nicht
-vorhanden und lassen sich ohne Schriftdateien nicht laden. An ihrer Stelle
-stehen **Segoe UI** und — für Kennzahlen, wie dort Cormorant — **Constantia**,
-die einzige mitgelieferte Serifenschrift mit Mediävalziffern. Liegen die
-Schriftdateien einmal vor, sind es zwei Zeilen in `src/Theme.cs`.
+**Die Hausschriften sind eingebettet — bisher nur für das Kopfband.** Manrope
+(300 und 700) und Cormorant Garamond (400 kursiv) liegen unter
+`assets\schriften` und wandern beim Bau als Ressource in die exe; es sind
+dieselben Schnitte, die ElasPrintFlow von Google Fonts lädt. WPF kann eine
+Schrift nur aus einer Datei laden, deshalb schreibt `src\BrandFonts.cs` sie
+beim ersten Gebrauch nach `%TEMP%\Elas3DView\schriften`. Der Name im Kopfband
+steht damit in Manrope, 26 px in zwei Gewichten und mit der Laufweite von drüben
+(`TrackedWord` — ein WPF-`TextBlock` kennt keine), der Leitsatz in Cormorant
+Garamond. Beide Schriften stehen unter der SIL Open Font License; die Texte
+liegen neben den Dateien.
+
+**Abweichung, die bleibt:** Die übrige Oberfläche steht weiter in **Segoe UI**
+und — für Kennzahlen, wie dort Cormorant — in **Constantia**, der einzigen
+mitgelieferten Serifenschrift mit Mediävalziffern. Dafür fehlen die Schnitte
+400 und 600 von Manrope und der aufrechte von Cormorant Garamond; lägen sie
+unter `assets\schriften`, sind es zwei Zeilen in `src/Theme.cs`. Lassen sich
+die eingebetteten Schriften nicht laden, fällt auch das Kopfband auf Segoe UI
+und Constantia zurück.
 
 ---
 
@@ -389,6 +419,7 @@ src\MainWindow.cs    Oberfläche, Kamera, Beleuchtung, JPG, Umbenennen, Löschen
 src\Dialogs.cs       Umbenennen-Dialog und Programmeinstieg
 src\PrintFlow.cs     Übergabe an ElasPrintFlow: Anmeldung, Hochladen, Anlegen, Byte-Vergleich
 src\PrintFlowDialogs.cs  Anmeldung und Übernahme-Dialog, Prüfung ohne Bildschirm
+src\Version.cs       die Version, die Liste der Neuerungen und ihr Fenster
 tests\SelfTest.cs    Testfälle samt Erzeugung der Testmodelle
 tests\UiShot.cs      startet das echte Fenster und prüft Design und JPG-Schalter
 build.ps1            Symbol erzeugen und kompilieren

@@ -36,11 +36,36 @@ namespace Elas3DView
         public string ArticleNumber;
         public string NasPath;
 
-        /// <summary>Die Datei auf der NAS wurde Byte für Byte mit der lokalen verglichen.</summary>
+        /// <summary>Jede Datei auf der NAS wurde Byte für Byte mit der lokalen verglichen.</summary>
         public bool Verified;
 
         /// <summary>Warum der Vergleich nicht gelang oder nicht stimmte.</summary>
         public string VerifyProblem;
+
+        /// <summary>
+        /// Weitere Dateien derselben Akte, wie sie im Modellordner heißen — in
+        /// ElasPrintFlow stehen sie unter „Quelldateien &amp; Varianten".
+        /// </summary>
+        public List<string> ExtraNames = new List<string>();
+
+        /// <summary>Vorschaubilder, die sich nicht ablegen ließen. Die Dateien selbst liegen trotzdem da.</summary>
+        public int PicturesFailed;
+    }
+
+    /// <summary>
+    /// Eine Datei, die MIT in die Akte geht (Tristan, 14.11.2026): keine eigene
+    /// Modellakte, keine eigene Artikelnummer — sie liegt im Ordner des Modells
+    /// neben der Hauptdatei.
+    /// </summary>
+    public class PrintFlowFile
+    {
+        public string Path;
+
+        /// <summary>
+        /// Das Bild für die Variantenliste (dort Name.vorschau.png). Null, wenn
+        /// keines erzeugt wurde — die Datei geht dann ohne Bild hinüber.
+        /// </summary>
+        public byte[] PicturePng;
     }
 
     public class PrintFlowProgress
@@ -333,37 +358,78 @@ namespace Elas3DView
         /// Legt ein Modell vollständig an. Wirft, solange nichts angelegt ist; ist
         /// es angelegt, kommt es zurück — auch wenn der Vergleich danach scheitert.
         /// </summary>
+        /// <param name="extras">
+        /// Weitere Dateien für dieselbe Akte; null oder leer, wenn das Modell aus
+        /// einer Datei besteht. Sie behalten ihren Namen und liegen danach neben
+        /// der Hauptdatei — ElasPrintFlow legt für sie kein eigenes Modell an.
+        /// </param>
+        /// <param name="mainPicturePng">
+        /// Das Bild der Hauptdatei für die Variantenliste. Nur von Belang, wenn es
+        /// weitere Dateien gibt: Dann soll jede Zeile dort ihr Bild haben.
+        /// </param>
         public async Task<PrintFlowModel> Import(string filePath, string name, string category, byte[] titlePng,
+                                                 IList<PrintFlowFile> extras, byte[] mainPicturePng,
                                                  IProgress<PrintFlowProgress> progress, CancellationToken ct)
         {
-            string fileName = Path.GetFileName(filePath);
+            // Die Hauptdatei steht vorn — an dieser Stelle hängt in jedem Schritt, welche es ist.
+            List<string> locals = new List<string>();
+            locals.Add(filePath);
+            if (extras != null) foreach (PrintFlowFile x in extras) locals.Add(x.Path);
+            int total = locals.Count;
+
             string folder = "Elas3DView " + DateTime.Now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture) +
                             " " + Guid.NewGuid().ToString("N").Substring(0, 6);
 
-            // 1. Hochladen
-            Reply up;
-            using (UploadContent body = new UploadContent(filePath, fileName, folder, progress, ct))
-                up = await Send(HttpMethod.Post, "api/models/hochladen-lokal", body, 0, ct, false)
-                           .ConfigureAwait(false);
-
-            object okFlag;
-            bool written = up.Ok && up.Object != null && up.Object.TryGetValue("ok", out okFlag) &&
-                           okFlag is bool && (bool)okFlag;
-            if (!written)
+            // 1. Hochladen — jede Datei als eigene Anfrage in denselben Ordner.
+            //    Die Grenze von 300 MB gilt drüben je Anfrage, nicht je Akte.
+            string remoteFolder = null;
+            List<string> uploaded = new List<string>();
+            Exception uploadFailure = null;
+            try
             {
-                string why = Str(up.Object, "error");
-                IList skipped = List(up.Object, "uebergangen");
-                if (string.IsNullOrEmpty(why) && skipped != null && skipped.Count > 0)
-                    why = Convert.ToString(skipped[0], CultureInfo.InvariantCulture);
-                throw new PrintFlowException(string.IsNullOrEmpty(why) ? "Das Hochladen ist fehlgeschlagen." : why);
-            }
-            string remoteFolder = Str(up.Object, "ordner");
+                for (int i = 0; i < total; i++)
+                {
+                    string fileName = Path.GetFileName(locals[i]);
+                    string label = total == 1
+                        ? "Datei wird hochgeladen …"
+                        : "Datei " + (i + 1) + " von " + total + " wird hochgeladen …";
 
-            // Ab hier liegt die Datei drüben. Ein Abbruch ließe sie herrenlos zurück.
+                    Reply up;
+                    using (UploadContent body = new UploadContent(locals[i], fileName, folder, label, progress, ct))
+                        up = await Send(HttpMethod.Post, "api/models/hochladen-lokal", body, 0, ct, false)
+                                   .ConfigureAwait(false);
+
+                    object okFlag;
+                    bool written = up.Ok && up.Object != null && up.Object.TryGetValue("ok", out okFlag) &&
+                                   okFlag is bool && (bool)okFlag;
+                    if (!written)
+                    {
+                        string why = Str(up.Object, "error");
+                        IList skipped = List(up.Object, "uebergangen");
+                        if (string.IsNullOrEmpty(why) && skipped != null && skipped.Count > 0)
+                            why = Convert.ToString(skipped[0], CultureInfo.InvariantCulture);
+                        if (string.IsNullOrEmpty(why)) why = "Das Hochladen ist fehlgeschlagen.";
+                        throw new PrintFlowException(total == 1 ? why : fileName + ": " + why);
+                    }
+                    remoteFolder = Str(up.Object, "ordner");
+                    uploaded.Add(remoteFolder + "\\" + fileName);
+                }
+            }
+            catch (Exception ex) { uploadFailure = ex; }
+
+            if (uploadFailure != null)
+            {
+                // Bricht es bei der dritten Datei ab, liegen zwei schon drüben —
+                // herrenlos, denn ein Modell gibt es noch nicht. Sie gehen wieder weg.
+                foreach (string orphan in uploaded) await Discard(orphan).ConfigureAwait(false);
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(uploadFailure).Throw();
+            }
+
+            // Ab hier liegen die Dateien drüben. Ein Abbruch ließe sie herrenlos zurück.
             ct = CancellationToken.None;
 
             // 2. Erfassen
-            Report(progress, "Datei wird erfasst …");
+            Report(progress, total == 1 ? "Datei wird erfasst …" : "Dateien werden erfasst …");
             Reply scan = await Send(HttpMethod.Post, "api/models/scan-legacy",
                                     JsonBody(Map("folderPath", remoteFolder)), 120, ct, false)
                                .ConfigureAwait(false);
@@ -375,18 +441,36 @@ namespace Elas3DView
             // steht dann unter „bereitsErfasst". Der Ordner gehört allein dieser
             // Übernahme, also ist beides die eigene Datei. Ob es das Modell
             // wirklich schon gibt, entscheidet der gewählte Name — in Schritt 3.
+            //
+            // WIE DER SCAN DIE DATEIEN GRUPPIERT, ZÄHLT HIER NICHT. Er macht aus
+            // ähnlichen Namen ein Modell und aus verschiedenen mehrere; welche
+            // Dateien zusammengehören, hat der Nutzer angehakt. Gelesen werden
+            // nur die Pfade, unter denen ElasPrintFlow die Dateien führt.
             List<Dictionary<string, object>> seen = new List<Dictionary<string, object>>();
             Collect(seen, List(scan.Object, "models"));
             Collect(seen, List(scan.Object, "bereitsErfasst"));
-            if (seen.Count != 1)
-                throw new PrintFlowException("ElasPrintFlow hat in der Ablage " + seen.Count +
-                                             " statt einer Datei gefunden." + Where(remoteFolder));
-            string remotePath = Str(seen[0], "path");
+            if (seen.Count != total)
+                throw new PrintFlowException("ElasPrintFlow hat in der Ablage " + seen.Count + " statt " +
+                                             (total == 1 ? "einer Datei" : total + " Dateien") + " gefunden." +
+                                             Where(remoteFolder));
 
-            // 3. Anlegen
+            Dictionary<string, Dictionary<string, object>> byName =
+                new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+            foreach (Dictionary<string, object> d in seen) byName[Str(d, "name") ?? ""] = d;
+
+            // 3. Anlegen — ein Modell, die erste Datei ist die Hauptdatei
             Report(progress, "Modell wird angelegt …");
             ArrayList files = new ArrayList();
-            files.Add(Map("name", Str(seen[0], "name"), "path", remotePath, "isMain", true));
+            List<string> remotePaths = new List<string>();
+            for (int i = 0; i < total; i++)
+            {
+                Dictionary<string, object> d;
+                if (!byName.TryGetValue(Path.GetFileName(locals[i]), out d))
+                    throw new PrintFlowException("ElasPrintFlow führt „" + Path.GetFileName(locals[i]) +
+                                                 "“ in der Ablage nicht." + Where(remoteFolder));
+                files.Add(Map("name", Str(d, "name"), "path", Str(d, "path"), "isMain", i == 0));
+                remotePaths.Add(Str(d, "path"));
+            }
             string picture = titlePng == null ? null : "data:image/png;base64," + Convert.ToBase64String(titlePng);
 
             Reply done = await Send(HttpMethod.Post, "api/models/execute-batch-import",
@@ -396,10 +480,18 @@ namespace Elas3DView
 
             if (done.Status == 409)
             {
-                await Discard(remotePath).ConfigureAwait(false);
-                PrintFlowException dup = new PrintFlowException(
-                    "„" + name + "“ gibt es in der Kategorie „" + category + "“ schon.");
-                dup.Duplicate = true;
+                foreach (string orphan in remotePaths) await Discard(orphan).ConfigureAwait(false);
+
+                // Zwei Gründe für 409: Den Namen gibt es in der Kategorie schon —
+                // oder im Zielordner liegt bereits eine Datei, die überschrieben
+                // würde (`zielBelegt`). Beim zweiten sagt die Antwort, welche.
+                object blocked;
+                bool targetTaken = done.Object != null && done.Object.TryGetValue("zielBelegt", out blocked) &&
+                                   blocked is bool && (bool)blocked;
+                PrintFlowException dup = new PrintFlowException(targetTaken
+                    ? done.Error("Im Zielordner liegt bereits eine Datei dieses Namens.")
+                    : "„" + name + "“ gibt es in der Kategorie „" + category + "“ schon.");
+                dup.Duplicate = !targetTaken;
                 throw dup;
             }
             object success;
@@ -429,11 +521,81 @@ namespace Elas3DView
             }
             catch (PrintFlowException) { }
 
-            // 5. Die abgelegte Datei gegen die lokale halten
-            Report(progress, "Ablage auf der NAS wird geprüft …");
-            model.VerifyProblem = await Compare(model.Id, filePath, progress).ConfigureAwait(false);
+            // Der Ordner des Modells, wie ElasPrintFlow ihn schreibt. Die Hauptdatei
+            // heißt dort wie das Modell, die weiteren behalten ihren Namen.
+            string remoteDir = null, mainStored = null;
+            if (!string.IsNullOrEmpty(model.NasPath))
+            {
+                int cut = model.NasPath.LastIndexOfAny(new char[] { '/', '\\' });
+                if (cut > 0)
+                {
+                    remoteDir = model.NasPath.Substring(0, cut);
+                    mainStored = model.NasPath.Substring(cut + 1);
+                }
+            }
+            for (int i = 1; i < total; i++) model.ExtraNames.Add(Path.GetFileName(locals[i]));
+
+            // 5. Die Bilder für die Variantenliste. Sie sind eine Zugabe: Scheitert
+            //    eines, liegt die Datei trotzdem da, und das Bild lässt sich in der
+            //    Modellakte nachholen.
+            if (total > 1)
+            {
+                Report(progress, "Vorschaubilder werden abgelegt …");
+                if (mainPicturePng != null && mainStored != null &&
+                    !await SetVariantPicture(model.Id, mainStored, mainPicturePng).ConfigureAwait(false))
+                    model.PicturesFailed++;
+                foreach (PrintFlowFile x in extras)
+                {
+                    if (x.PicturePng == null) continue;
+                    if (!await SetVariantPicture(model.Id, Path.GetFileName(x.Path), x.PicturePng).ConfigureAwait(false))
+                        model.PicturesFailed++;
+                }
+            }
+
+            // 6. Jede abgelegte Datei gegen die lokale halten. Die Hauptdatei
+            //    liefert ElasPrintFlow über die Nummer des Modells, die weiteren
+            //    über ihren Pfad im Modellordner.
+            for (int i = 0; i < total; i++)
+            {
+                string label = total == 1
+                    ? "Ablage auf der NAS wird geprüft …"
+                    : "Ablage auf der NAS wird geprüft (" + (i + 1) + " von " + total + ") …";
+                Report(progress, label);
+
+                string problem;
+                if (i == 0)
+                    problem = await Compare(new Uri(_base, "api/models/file?id=" + model.Id),
+                                            locals[i], label, progress).ConfigureAwait(false);
+                else if (remoteDir == null)
+                    problem = "Der Ablageort ließ sich nicht nachlesen.";
+                else
+                    problem = await Compare(
+                        new Uri(_base, "api/models/variant-file?path=" +
+                                       Uri.EscapeDataString(remoteDir + "/" + Path.GetFileName(locals[i]))),
+                        locals[i], label, progress).ConfigureAwait(false);
+
+                if (problem != null)
+                {
+                    model.VerifyProblem = total == 1 ? problem : Path.GetFileName(locals[i]) + ": " + problem;
+                    break;
+                }
+            }
             model.Verified = model.VerifyProblem == null;
             return model;
+        }
+
+        /// <summary>Legt das Bild einer Quelldatei neben sie (dort Name.vorschau.png).</summary>
+        private async Task<bool> SetVariantPicture(int id, string storedName, byte[] png)
+        {
+            try
+            {
+                Reply r = await Send(HttpMethod.Post, "api/models/variants/bild",
+                    JsonBody(Map("modelId", id, "dateiname", storedName,
+                                 "bild", "data:image/png;base64," + Convert.ToBase64String(png))),
+                    120, CancellationToken.None, false).ConfigureAwait(false);
+                return r.Ok;
+            }
+            catch (PrintFlowException) { return false; }
         }
 
         private static void Collect(List<Dictionary<string, object>> into, IList models)
@@ -486,13 +648,13 @@ namespace Elas3DView
         /// genau das ankam.
         /// </summary>
         /// <returns>null, wenn beide gleich sind; sonst der Grund.</returns>
-        private async Task<string> Compare(int id, string localPath, IProgress<PrintFlowProgress> progress)
+        private async Task<string> Compare(Uri source, string localPath, string label,
+                                           IProgress<PrintFlowProgress> progress)
         {
             try
             {
                 using (CancellationTokenSource limit = new CancellationTokenSource(TimeSpan.FromMinutes(20)))
-                using (HttpRequestMessage req = new HttpRequestMessage(
-                           HttpMethod.Get, new Uri(_base, "api/models/file?id=" + id)))
+                using (HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Get, source))
                 using (HttpResponseMessage res = await _http.SendAsync(
                            req, HttpCompletionOption.ResponseHeadersRead, limit.Token).ConfigureAwait(false))
                 {
@@ -527,7 +689,7 @@ namespace Elas3DView
                             if (pct != shown)
                             {
                                 shown = pct;
-                                Report(progress, "Ablage auf der NAS wird geprüft …  " + pct + " %");
+                                Report(progress, label + "  " + pct + " %");
                             }
                         }
                         if (done != total)
@@ -589,12 +751,15 @@ namespace Elas3DView
             private readonly byte[] _head, _tail;
             private readonly IProgress<PrintFlowProgress> _progress;
             private readonly CancellationToken _ct;
+            private readonly string _label;
 
-            public UploadContent(string path, string fileName, string folder,
+            /// <param name="label">Was der Nutzer liest; die Prozentzahl kommt dahinter.</param>
+            public UploadContent(string path, string fileName, string folder, string label,
                                  IProgress<PrintFlowProgress> progress, CancellationToken ct)
             {
                 _progress = progress;
                 _ct = ct;
+                _label = label;
                 _file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, true);
 
                 string boundary = "----Elas3DView" + Guid.NewGuid().ToString("N");
@@ -640,7 +805,7 @@ namespace Elas3DView
                     {
                         shown = pct;
                         PrintFlowProgress p = new PrintFlowProgress();
-                        p.Text = "Datei wird hochgeladen …  " + pct + " %";
+                        p.Text = _label + "  " + pct + " %";
                         p.CanCancel = true;
                         _progress.Report(p);
                     }

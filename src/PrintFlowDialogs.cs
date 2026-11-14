@@ -274,10 +274,15 @@ namespace Elas3DView
 
         /// <param name="marks">Auswahl der Wasserzeichen; Eintrag 0 heißt „ohne".</param>
         /// <param name="render">Zeichnet das Titelbild mit dem Wasserzeichen dieses Eintrags neu.</param>
+        /// <param name="fileRows">
+        /// Nur wenn mehrere Dateien in die Akte gehen: je Zeile Name und Größe,
+        /// die Hauptdatei zuerst. Null, wenn das Modell aus einer Datei besteht.
+        /// </param>
         public PrintFlowDialog(string caption, string connection, string name,
                                List<string> categories, string category,
                                List<string> marks, int mark,
-                               BitmapSource picture, Func<int, BitmapSource> render)
+                               BitmapSource picture, Func<int, BitmapSource> render,
+                               IList<string[]> fileRows = null)
             : base("Ins PrintFlow übernehmen", caption, 580)
         {
             _render = render;
@@ -307,6 +312,9 @@ namespace Elas3DView
             _imageInfo.SetResourceReference(TextBlock.ForegroundProperty, "TextWeak");
             Root.Children.Add(_imageInfo);
             ShowImageInfo();
+
+            // ---- Dateien dieser Akte ----
+            if (fileRows != null && fileRows.Count > 1) AddFileList(fileRows);
 
             // ---- Angaben ----
             _name = new TextBox();
@@ -368,6 +376,84 @@ namespace Elas3DView
                 _name.Focus();
                 _name.SelectAll();
             };
+        }
+
+        /// <summary>
+        /// Was alles in diese EINE Akte geht (Tristan, 14.11.2026): die Hauptdatei
+        /// — das geöffnete Modell — und die in der Dateiliste angehakten. Nur zum
+        /// Lesen: Geändert wird die Auswahl dort, wo sie getroffen wurde, an den
+        /// Häkchen. Die Hauptdatei lässt sich später in der Modellakte wechseln.
+        /// </summary>
+        private void AddFileList(IList<string[]> rows)
+        {
+            TextBlock head = new TextBlock();
+            head.Text = "DATEIEN DIESER AKTE  ·  " + rows.Count;
+            head.FontSize = 10.5;
+            head.FontWeight = FontWeights.SemiBold;
+            head.Margin = new Thickness(2, 0, 0, 6);
+            head.SetResourceReference(TextBlock.ForegroundProperty, "GoldText");
+            Root.Children.Add(head);
+
+            StackPanel list = new StackPanel();
+            for (int i = 0; i < rows.Count; i++)
+            {
+                DockPanel row = new DockPanel();
+                row.Margin = new Thickness(0, i == 0 ? 0 : 5, 0, 0);
+
+                TextBlock size = new TextBlock();
+                size.Text = rows[i].Length > 1 ? rows[i][1] : "";
+                size.FontSize = 11.5;
+                size.Margin = new Thickness(12, 0, 0, 0);
+                size.VerticalAlignment = VerticalAlignment.Center;
+                size.SetResourceReference(TextBlock.ForegroundProperty, "TextMuted");
+                DockPanel.SetDock(size, Dock.Right);
+                row.Children.Add(size);
+
+                TextBlock role = new TextBlock();
+                role.Text = i == 0 ? "Hauptdatei" : "dazu";
+                role.Width = 76;
+                role.FontSize = 11.5;
+                role.VerticalAlignment = VerticalAlignment.Center;
+                role.SetResourceReference(TextBlock.ForegroundProperty, i == 0 ? "GoldText" : "TextWeak");
+                DockPanel.SetDock(role, Dock.Left);
+                row.Children.Add(role);
+
+                TextBlock name = new TextBlock();
+                name.Text = rows[i][0];
+                name.FontSize = 12.5;
+                name.TextTrimming = TextTrimming.CharacterEllipsis;
+                name.VerticalAlignment = VerticalAlignment.Center;
+                name.ToolTip = rows[i][0];
+                name.SetResourceReference(TextBlock.ForegroundProperty, "TextDim");
+                row.Children.Add(name);
+
+                list.Children.Add(row);
+            }
+
+            ScrollViewer scroll = new ScrollViewer();
+            scroll.MaxHeight = 112;
+            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            scroll.Focusable = false;
+            scroll.Content = list;
+
+            Border box = new Border();
+            box.CornerRadius = new CornerRadius(9);
+            box.BorderThickness = new Thickness(1);
+            box.Padding = new Thickness(11, 9, 11, 9);
+            box.SetResourceReference(Border.BackgroundProperty, "Bg");
+            box.SetResourceReference(Border.BorderBrushProperty, "Border");
+            box.Child = scroll;
+            Root.Children.Add(box);
+
+            TextBlock note = new TextBlock();
+            note.Text = "Die weiteren Dateien liegen danach im Ordner dieses Modells — ohne eigene Artikelnummer. " +
+                        "Jede bekommt ein Vorschaubild; in ElasPrintFlow stehen sie unter „Quelldateien & Varianten“.";
+            note.FontSize = 11.5;
+            note.TextWrapping = TextWrapping.Wrap;
+            note.Margin = new Thickness(2, 6, 0, 14);
+            note.SetResourceReference(TextBlock.ForegroundProperty, "TextWeak");
+            Root.Children.Add(note);
         }
 
         private void ShowImageInfo()
@@ -457,6 +543,18 @@ namespace Elas3DView
                                     marks, marks.Count > 1 ? 1 : 0, picture, null)
                     .SavePicture(Path.Combine(dir, "3-uebernahme.png"), null);
 
+                // Dieselbe Übernahme mit weiteren Dateien für die Akte.
+                string stem = Path.GetFileNameWithoutExtension(modelPath);
+                List<string[]> rows = new List<string[]>();
+                rows.Add(new string[] { file, "1,7 MB" });
+                rows.Add(new string[] { stem + " (1).3mf", "2,3 MB" });
+                rows.Add(new string[] { stem + " (2).3mf", "2,1 MB" });
+                rows.Add(new string[] { stem + " ohne Boden.stl", "940 kB" });
+                new PrintFlowDialog(file + " und 3 weitere Dateien  ·  7,0 MB   →   " + PrintFlowClient.DefaultUrl, "",
+                                    stem, categories, "Vasen",
+                                    marks, marks.Count > 1 ? 1 : 0, picture, null, rows)
+                    .SavePicture(Path.Combine(dir, "3b-uebernahme-mehrere.png"), null);
+
                 PrintFlowModel model = new PrintFlowModel();
                 model.Id = 2743;
                 model.Name = Path.GetFileNameWithoutExtension(modelPath);
@@ -472,6 +570,17 @@ namespace Elas3DView
                     MainWindow.DeleteYes, MainWindow.DeleteNo, true,
                     MainWindow.TransferLinks(model, PrintFlowClient.DefaultUrl));
 
+                // Die Löschfrage, wenn mehrere Dateien in die Akte gegangen sind.
+                model.ExtraNames.Add(stem + " (1).3mf");
+                model.ExtraNames.Add(stem + " (2).3mf");
+                victims.Add(stem + " (1).3mf");
+                victims.Add(stem + " (2).3mf");
+                victims.Add(stem + " (2).jpg");
+                AppDialog.SavePicture(Path.Combine(dir, "4b-loeschfrage-mehrere.png"), DlgKind.Success,
+                    MainWindow.DeleteTitle, MainWindow.DeleteQuestion(model, victims),
+                    MainWindow.DeleteYes, MainWindow.DeleteNo, true,
+                    MainWindow.TransferLinks(model, PrintFlowClient.DefaultUrl));
+
                 new ReleaseNotesDialog().SavePicture(Path.Combine(dir, "7-neuerungen.png"), null);
 
                 // Das Hauptfenster selbst, in beiden Designs — für Kopfband und Leisten.
@@ -480,6 +589,11 @@ namespace Elas3DView
                 // rechnet es seinen Inhalt mit eigenen Maßen neu, und das Bild
                 // käme breiter und flacher heraus, als das Fenster ist.
                 w.ProbeWindow(Path.Combine(dir, "5-fenster.png"));
+
+                // Die Bilder der angehakten Dateien — nach dem Fensterbild, weil
+                // dafür jede einmal in die Ansicht gestellt wird.
+                w.ProbePictograms(dir);
+
                 MainWindow light = new MainWindow();
                 Theme.Apply(false);
                 light.ProbeWindow(Path.Combine(dir, "6-fenster-hell.png"));

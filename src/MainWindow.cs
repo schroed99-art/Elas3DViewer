@@ -19,11 +19,46 @@ using System.Windows.Threading;
 
 namespace Elas3DView
 {
-    public class FileEntry
+    /// <summary>
+    /// Eine Zeile der Dateiliste. Eigenschaften statt Felder, weil die Zeile seit
+    /// dem 14.11.2026 ein Häkchen trägt und die Liste es über eine Bindung liest.
+    /// </summary>
+    public class FileEntry : System.ComponentModel.INotifyPropertyChanged
     {
-        public string Name;
-        public string FullPath;
-        public bool IsImage;
+        public string Name { get; set; }
+        public string FullPath { get; set; }
+        public bool IsImage { get; set; }
+
+        private bool _marked;
+
+        /// <summary>
+        /// Angehakt: Diese Datei geht bei „Ins PrintFlow …" MIT in die Akte des
+        /// geöffneten Modells — als weitere Quelldatei, nicht als eigenes Modell.
+        /// </summary>
+        public bool Marked
+        {
+            get { return _marked; }
+            set
+            {
+                if (_marked == value) return;
+                _marked = value;
+                if (PropertyChanged != null)
+                    PropertyChanged(this, new System.ComponentModel.PropertyChangedEventArgs("Marked"));
+                if (MarkedChanged != null) MarkedChanged(this);
+            }
+        }
+
+        /// <summary>Bilder haben kein Häkchen: Zur Akte gehören nur STL und 3MF.</summary>
+        public Visibility MarkVisibility
+        {
+            get { return IsImage ? Visibility.Collapsed : Visibility.Visible; }
+        }
+
+        /// <summary>Das Fenster hört hier mit, um die Auswahl über ein Neuladen der Liste zu halten.</summary>
+        public Action<FileEntry> MarkedChanged;
+
+        public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;
+
         public override string ToString() { return Name; }
     }
 
@@ -464,6 +499,7 @@ namespace Elas3DView
             _fileList = new ListBox();
             _fileList.Style = (Style)Application.Current.Resources["List"];
             _fileList.ItemContainerStyle = (Style)Application.Current.Resources["ListItem"];
+            _fileList.ItemTemplate = FileRowTemplate();
             _fileList.SelectionChanged += OnFileSelected;
             _fileList.PreviewMouseRightButtonDown += OnListRightDown;
             _fileMenu = BuildFileMenu();
@@ -471,6 +507,74 @@ namespace Elas3DView
             dp.Children.Add(_fileList);
 
             return shell;
+        }
+
+        /// <summary>
+        /// Eine Zeile der Dateiliste: der Name, rechts ein Häkchen (Tristan,
+        /// 14.11.2026: „ich wähle ein Modell und markiere weitere Modelle, die
+        /// unter dieser Modellakte mit abgelegt werden").
+        ///
+        /// DAS HÄKCHEN WÄHLT NICHT AUS. Ein Klick darauf lädt das Modell nicht —
+        /// sonst wechselte mit jedem Anhaken die Hauptdatei. Geöffnet wird über
+        /// den Namen, angehakt über das Kästchen; das eine ist „dieses Modell",
+        /// das andere „gehört dazu".
+        /// </summary>
+        private static DataTemplate FileRowTemplate()
+        {
+            const string xaml = @"
+<DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'>
+  <DockPanel LastChildFill='True'>
+    <CheckBox DockPanel.Dock='Right' Style='{DynamicResource Chk}' Margin='8,0,0,0'
+              Focusable='False' VerticalAlignment='Center'
+              IsChecked='{Binding Marked, Mode=TwoWay}'
+              Visibility='{Binding MarkVisibility}'
+              ToolTip='Gehört mit zur Modellakte: Bei „Ins PrintFlow …“ wird diese Datei im Ordner des geöffneten Modells abgelegt, nicht als eigenes Modell.'/>
+    <TextBlock Text='{Binding Name}' TextTrimming='CharacterEllipsis' VerticalAlignment='Center'/>
+  </DockPanel>
+</DataTemplate>";
+            return (DataTemplate)System.Windows.Markup.XamlReader.Parse(xaml);
+        }
+
+        /// <summary>
+        /// Die angehakten Dateien — als Pfade, nicht als Zeilen: Die Liste wird bei
+        /// jedem Umschalten (Modelle/Bilder/Alle) und nach jedem Löschen neu gebaut,
+        /// die Auswahl soll das überstehen.
+        /// </summary>
+        private readonly HashSet<string> _marked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        private void OnEntryMarked(FileEntry fe)
+        {
+            if (fe.Marked) _marked.Add(fe.FullPath);
+            else _marked.Remove(fe.FullPath);
+            UpdateCount();
+        }
+
+        private void UpdateCount()
+        {
+            string text = _entries.Count == 1 ? "1 Datei" : _entries.Count + " Dateien";
+            if (_marked.Count > 0) text += "   ·   " + _marked.Count + " für die Akte angehakt";
+            _countLabel.Text = text;
+        }
+
+        private void OnClearMarks(object sender, RoutedEventArgs e)
+        {
+            // Über die Zeilen, damit die Kästchen mitgehen; der Rest fällt aus dem Satz.
+            foreach (FileEntry fe in _entries) fe.Marked = false;
+            _marked.Clear();
+            UpdateCount();
+        }
+
+        /// <summary>Die angehakten Modelldateien außer der genannten, in der Reihenfolge der Liste.</summary>
+        private List<string> MarkedExtras(string mainFile)
+        {
+            List<string> extras = new List<string>();
+            foreach (FileEntry fe in _entries)
+            {
+                if (fe.IsImage || !fe.Marked) continue;
+                if (string.Equals(fe.FullPath, mainFile, StringComparison.OrdinalIgnoreCase)) continue;
+                if (File.Exists(fe.FullPath)) extras.Add(fe.FullPath);
+            }
+            return extras;
         }
 
         private UIElement BuildViewport()
@@ -1052,6 +1156,7 @@ namespace Elas3DView
             cm.Items.Add(Item("Umbenennen", "F2", OnRename));
             cm.Items.Add(new Separator());
             cm.Items.Add(Item("Im Explorer zeigen", null, OnShowInExplorer));
+            cm.Items.Add(Item("Häkchen aufheben", null, OnClearMarks));
             cm.Items.Add(new Separator());
             cm.Items.Add(Item("Löschen", "Entf", OnDelete));
             return cm;
@@ -1677,6 +1782,14 @@ namespace Elas3DView
                 catch { return string.Compare(a, b, StringComparison.OrdinalIgnoreCase); }
             });
 
+            // Häkchen gelten für den Ordner, in dem sie gesetzt wurden. Wer den Ordner
+            // wechselt, nimmt sie nicht mit — eine Akte aus zwei Ordnern wäre ein Versehen.
+            _marked.RemoveWhere(delegate(string p)
+            {
+                return !string.Equals(Path.GetDirectoryName(p), _currentFolder, StringComparison.OrdinalIgnoreCase) ||
+                       !File.Exists(p);
+            });
+
             _entries.Clear();
             foreach (string f in files)
             {
@@ -1684,6 +1797,8 @@ namespace Elas3DView
                 fe.FullPath = f;
                 fe.Name = Path.GetFileName(f);
                 fe.IsImage = IsImageFile(f);
+                fe.Marked = !fe.IsImage && _marked.Contains(f);
+                fe.MarkedChanged = OnEntryMarked;       // erst jetzt: das Setzen oben ist kein Klick
                 _entries.Add(fe);
             }
 
@@ -1708,7 +1823,7 @@ namespace Elas3DView
 
             _folderLabel.Text = _currentFolder;
             _folderLabel.ToolTip = _currentFolder;
-            _countLabel.Text = _entries.Count == 1 ? "1 Datei" : _entries.Count + " Dateien";
+            UpdateCount();
         }
 
         private static readonly string[] ImageExtensions =
@@ -2099,6 +2214,12 @@ namespace Elas3DView
         /// </param>
         private BitmapSource RenderOffscreen(int width, int height, bool likeView)
         {
+            return RenderOffscreen(width, height, likeView, true);
+        }
+
+        /// <param name="withLogo">Falsch für die Bilder der Variantenliste: dort stört das Wasserzeichen nur.</param>
+        private BitmapSource RenderOffscreen(int width, int height, bool likeView, bool withLogo)
+        {
             int ss = 2;
             if ((long)width * ss * height * ss > 60000000L) ss = 1;
             int rw = width * ss, rh = height * ss;
@@ -2126,7 +2247,7 @@ namespace Elas3DView
             host.Children.Add(vp);
 
             // Dasselbe Logo wie in der Ansicht, auf die Breite des Bildes gerechnet.
-            if (_logoImage != null && _logoImage.Visibility == Visibility.Visible && _logoImage.Source != null)
+            if (withLogo && _logoImage != null && _logoImage.Visibility == Visibility.Visible && _logoImage.Source != null)
             {
                 Image mark = new Image();
                 mark.Source = _logoImage.Source;
@@ -2415,6 +2536,29 @@ namespace Elas3DView
                 return;
             }
 
+            // ---- Was angehakt ist, geht MIT in die Akte ----
+            // Das geöffnete Modell ist die Hauptdatei; die angehakten liegen danach
+            // als weitere Quelldateien in seinem Ordner. Die Grenze gilt je Datei:
+            // Jede reist als eigene Anfrage.
+            List<string> extraPaths = MarkedExtras(file);
+            long allBytes = bytes;
+            List<string[]> fileRows = new List<string[]>();
+            fileRows.Add(new string[] { Path.GetFileName(file), FormatBytes(bytes) });
+            foreach (string extra in extraPaths)
+            {
+                long size = new FileInfo(extra).Length;
+                if (size > PrintFlowClient.MaxUpload)
+                {
+                    AppDialog.Warn(this, "Datei zu groß",
+                        Path.GetFileName(extra) + " hat " + FormatBytes(size) + ".\n\n" +
+                        "ElasPrintFlow nimmt in einem Stück höchstens " +
+                        FormatBytes(PrintFlowClient.MaxUpload) + " an. Bitte das Häkchen dort entfernen.");
+                    return;
+                }
+                allBytes += size;
+                fileRows.Add(new string[] { Path.GetFileName(extra), FormatBytes(size) });
+            }
+
             List<string> categories = await ConnectPrintFlow(false, null);
             if (categories == null) return;
 
@@ -2440,15 +2584,20 @@ namespace Elas3DView
 
             while (true)
             {
+                string what = extraPaths.Count == 0
+                    ? Path.GetFileName(file)
+                    : Path.GetFileName(file) + " und " + extraPaths.Count +
+                      (extraPaths.Count == 1 ? " weitere Datei" : " weitere Dateien");
                 PrintFlowDialog dlg = new PrintFlowDialog(
-                    Path.GetFileName(file) + "  ·  " + FormatBytes(bytes) + "   →   " + _pfUrl,
+                    what + "  ·  " + FormatBytes(allBytes) + "   →   " + _pfUrl,
                     _pfUrl + (_pfUser.Length > 0 ? "  ·  angemeldet als " + _pfUser : ""),
                     name, categories, category, marks, Math.Max(0, _cbLogo.SelectedIndex), picture,
                     delegate(int mark)
                     {
                         if (mark >= 0 && mark < _cbLogo.Items.Count) _cbLogo.SelectedIndex = mark;
                         return RenderTitle();
-                    });
+                    },
+                    extraPaths.Count == 0 ? null : fileRows);
                 bool accepted = dlg.ShowOver(this);
                 name = dlg.ModelName;
                 category = dlg.Category;
@@ -2462,6 +2611,23 @@ namespace Elas3DView
                 }
                 if (!accepted) return;
                 if (!ContrastOkay("Trotzdem übernehmen", true)) continue;
+
+                // Die Hauptdatei heißt drüben wie das Modell. Trägt eine der
+                // weiteren Dateien schon genau diesen Namen, lägen zwei gleiche im
+                // Ordner — ElasPrintFlow lehnt das ab, aber erst nach dem Hochladen.
+                string stored = PrintFlowClient.CleanName(name) + Path.GetExtension(file);
+                string clash = null;
+                foreach (string extra in extraPaths)
+                    if (string.Equals(Path.GetFileName(extra), stored, StringComparison.OrdinalIgnoreCase))
+                        clash = Path.GetFileName(extra);
+                if (clash != null)
+                {
+                    AppDialog.Warn(this, "Zwei Dateien hießen gleich",
+                        "Die Hauptdatei wird in ElasPrintFlow zu „" + stored + "“ — so heißt aber schon die " +
+                        "angehakte Datei „" + clash + "“.\n\n" +
+                        "Bitte dem Modell einen anderen Namen geben oder das Häkchen dort entfernen.");
+                    continue;
+                }
 
                 // Vorab fragen, ob es Name und Kategorie schon gibt — sonst reist
                 // die Datei erst hinüber und wird dort abgelehnt.
@@ -2504,6 +2670,54 @@ namespace Elas3DView
                 return;
             }
 
+            // ---- Bilder für die Variantenliste ----
+            // Jede weitere Datei bekommt ihr eigenes Bild, in derselben Blickrichtung:
+            // Die Namen unterscheiden sich oft nur um eine Ziffer, ein Bild
+            // unterscheidet sie auf einen Blick. Dazu wird jede einmal geladen —
+            // wie bei „Alle als JPG"; danach steht wieder die Hauptdatei da.
+            List<PrintFlowFile> extras = new List<PrintFlowFile>();
+            byte[] mainPicture = null;
+            if (extraPaths.Count > 0)
+            {
+                bool stopped = false;
+                ShowBusy("Vorschaubilder werden erzeugt …", true);
+                await Task.Delay(1);
+                try
+                {
+                    try { mainPicture = EncodePng(RenderPictogram()); } catch { mainPicture = null; }
+
+                    for (int i = 0; i < extraPaths.Count; i++)
+                    {
+                        if (_cancelRequested) { stopped = true; break; }
+                        string p = extraPaths[i];
+                        BusyText(string.Format("Vorschaubild {0} / {1}   {2}", i + 1, extraPaths.Count, Path.GetFileName(p)));
+                        await Task.Delay(1);
+
+                        PrintFlowFile one = new PrintFlowFile();
+                        one.Path = p;
+                        try
+                        {
+                            LoadedModel m = await Task.Run<LoadedModel>(delegate { return MeshLoader.Load(p); });
+                            one.PicturePng = PictogramOf(m);
+                        }
+                        catch { one.PicturePng = null; }    // die Datei geht trotzdem mit, nur ohne Bild
+                        extras.Add(one);
+                    }
+                    if (_cancelRequested) stopped = true;
+                }
+                finally { HideBusy(); }
+
+                // Zurück zur Hauptdatei — sie ist das Modell, um das es geht.
+                _currentFile = null;
+                await LoadFile(file);
+
+                if (stopped)
+                {
+                    Toast("Übernahme abgebrochen — nichts angelegt, nichts gelöscht", false);
+                    return;
+                }
+            }
+
             ShowBusy("Datei wird hochgeladen …", true);
             _pfCancel = new System.Threading.CancellationTokenSource();
             bool live = true;
@@ -2517,7 +2731,10 @@ namespace Elas3DView
             PrintFlowModel model = null;
             Exception failure = null;
             bool canceled = false;
-            try { model = await _pf.Import(file, name, category, png, progress, _pfCancel.Token); }
+            try
+            {
+                model = await _pf.Import(file, name, category, png, extras, mainPicture, progress, _pfCancel.Token);
+            }
             catch (OperationCanceledException) { canceled = true; }
             catch (Exception ex) { failure = ex; }
 
@@ -2541,7 +2758,73 @@ namespace Elas3DView
                 return;
             }
 
-            FinishTransfer(file, model);
+            FinishTransfer(file, extraPaths, model);
+        }
+
+        /// <summary>
+        /// Das Bild einer Datei für die Variantenliste in ElasPrintFlow: die
+        /// Ansicht, wie sie steht, samt Hintergrund — aber ohne Logo und kleiner
+        /// als das Titelbild. Es soll Dateien unterscheidbar machen, nicht werben.
+        /// </summary>
+        private BitmapSource RenderPictogram()
+        {
+            int w = 960;
+            int h = (int)Math.Round(w / Math.Max(0.2, ViewAspect()));
+            if (h < 16) h = 16;
+            return RenderOffscreen(w, h, true, false);
+        }
+
+        /// <summary>
+        /// Stellt ein geladenes Modell NUR FÜR SEIN BILD in die Ansicht — in der
+        /// Blickrichtung, die gerade steht, eingepasst wie bei „Alle als JPG".
+        /// Die geöffnete Datei bleibt, wer sie war: Der Aufrufer lädt sie danach
+        /// wieder, sonst zeigte die Ansicht ein Modell und die Liste ein anderes.
+        /// </summary>
+        private byte[] PictogramOf(LoadedModel m)
+        {
+            _model = m;
+            if (_liveMesh != null) _liveScene.Children.Remove(_liveMesh);
+            _liveMesh = NewMeshModel();
+            _liveScene.Children.Add(_liveMesh);
+            FitToModel(true);
+            UpdateCamera();
+            TrimMemory();
+            return EncodePng(RenderPictogram());
+        }
+
+        /// <summary>
+        /// Für die Prüfung ohne Bildschirm (Schalter /dialogbilder): die Bilder,
+        /// die bei einer Übernahme für die angehakten Dateien entstünden, und das
+        /// der Hauptdatei — danach steht wieder die Hauptdatei in der Ansicht.
+        /// </summary>
+        internal void ProbePictograms(string dir)
+        {
+            string main = _modelFile;
+            if (main == null) return;
+            ProbeLayout();
+            File.WriteAllBytes(Path.Combine(dir, "8-vorschau-hauptdatei.png"), EncodePng(RenderPictogram()));
+            int n = 0;
+            foreach (string extra in MarkedExtras(main))
+            {
+                ProbeLayout();
+                File.WriteAllBytes(Path.Combine(dir, "8-vorschau-dazu-" + (++n) + ".png"),
+                                   PictogramOf(MeshLoader.Load(extra)));
+            }
+            SetModel(MeshLoader.Load(main), main);
+        }
+
+        /// <summary>
+        /// Nur für die Prüfung ohne Bildschirm: Ein nie gezeigtes Fenster verliert
+        /// nach jedem Zeichnen seine Maße (siehe DialogProbe), und die Bilder
+        /// rechnen mit dem Seitenverhältnis der Ansicht. Im echten Fenster steht
+        /// das fest; hier wird es vor jedem Bild neu gesetzt.
+        /// </summary>
+        private void ProbeLayout()
+        {
+            FrameworkElement root = (FrameworkElement)Content;
+            root.Measure(new Size(1340, 820));
+            root.Arrange(new Rect(0, 0, 1340, 820));
+            root.UpdateLayout();
         }
 
         /// <summary>
@@ -2654,6 +2937,15 @@ namespace Elas3DView
             string head = "„" + model.Name + "“ liegt jetzt in ElasPrintFlow.\n\n" +
                           "Artikelnummer:  " + (string.IsNullOrEmpty(model.ArticleNumber) ? "–" : model.ArticleNumber) + "\n" +
                           "Kategorie:  " + model.Category;
+            // Mehrere Dateien, EINE Akte — die weiteren stehen dort unter
+            // „Quelldateien & Varianten", nicht als eigene Modelle.
+            int more = model.ExtraNames == null ? 0 : model.ExtraNames.Count;
+            if (more > 0)
+                head += "\nDateien:  " + (more + 1) + " — die Hauptdatei und " + more + " weitere im selben Ordner";
+            if (model.PicturesFailed > 0)
+                head += "\n" + model.PicturesFailed + (model.PicturesFailed == 1
+                    ? " Vorschaubild ließ sich nicht ablegen"
+                    : " Vorschaubilder ließen sich nicht ablegen") + " — in der Modellakte nachholbar";
             string folder = NasFolder(model.NasPath);
             return folder == null ? head : head + "\n" + folder;
         }
@@ -2662,9 +2954,12 @@ namespace Elas3DView
         {
             string list = "";
             foreach (string p in victims) list += "\n•  " + Path.GetFileName(p);
+            int files = 1 + (model.ExtraNames == null ? 0 : model.ExtraNames.Count);
             return TransferSummary(model) + "\n\n" +
-                   "Die Datei auf der NAS stimmt Byte für Byte mit der lokalen überein.\n\n" +
-                   "Von diesem Rechner endgültig löschen:" + list + "\n\n" +
+                   (files == 1
+                       ? "Die Datei auf der NAS stimmt Byte für Byte mit der lokalen überein."
+                       : "Alle " + files + " Dateien auf der NAS stimmen Byte für Byte mit den lokalen überein.") +
+                   "\n\nVon diesem Rechner endgültig löschen:" + list + "\n\n" +
                    "Das geht am Papierkorb vorbei und lässt sich nicht zurückholen.";
         }
 
@@ -2712,6 +3007,17 @@ namespace Elas3DView
             if (_cbLogo.Items.Count > 1) _cbLogo.SelectedIndex = 1;
             SetModel(MeshLoader.Load(modelPath), modelPath);
 
+            // Die Dateiliste mit dem Ordner des Modells füllen und die übrigen
+            // Modelle anhaken — damit das Fensterbild die Häkchen zeigt.
+            RefreshFolder(modelPath);
+            int ticked = 0;
+            foreach (FileEntry fe in _entries)
+            {
+                if (fe.IsImage || string.Equals(fe.FullPath, modelPath, StringComparison.OrdinalIgnoreCase)) continue;
+                fe.Marked = true;
+                if (++ticked == 3) break;
+            }
+
             marks.Add("Ohne Wasserzeichen");
             for (int i = 1; i < _cbLogo.Items.Count; i++) marks.Add(Convert.ToString(_cbLogo.Items[i]));
 
@@ -2730,10 +3036,18 @@ namespace Elas3DView
         }
 
         /// <summary>Nach dem Anlegen: berichten, nachfragen, und erst dann lokal löschen.</summary>
-        private void FinishTransfer(string file, PrintFlowModel model)
+        /// <param name="extraPaths">Die weiteren Dateien derselben Akte; leer, wenn es nur die eine gab.</param>
+        private void FinishTransfer(string file, List<string> extraPaths, PrintFlowModel model)
         {
             string number = string.IsNullOrEmpty(model.ArticleNumber) ? "–" : model.ArticleNumber;
             DlgLink[] links = TransferLinks(model, _pfUrl);
+
+            // Die Häkchen haben ihren Dienst getan: Die Dateien liegen in der Akte,
+            // ob sie hier bleiben oder nicht. Stünden sie weiter da, gingen sie bei
+            // der nächsten Übernahme ein zweites Mal mit — in eine fremde Akte.
+            foreach (FileEntry fe in _entries) if (fe.Marked) fe.Marked = false;
+            _marked.Clear();
+            UpdateCount();
 
             if (!model.Verified)
             {
@@ -2746,6 +3060,11 @@ namespace Elas3DView
             List<string> victims = new List<string>();
             if (File.Exists(file)) victims.Add(file);
             victims.AddRange(Sidecars(file));
+            foreach (string extra in extraPaths)
+            {
+                if (File.Exists(extra)) victims.Add(extra);
+                victims.AddRange(Sidecars(extra));
+            }
 
             bool delete = victims.Count > 0 && AppDialog.Ask(this, DlgKind.Success,
                 DeleteTitle, DeleteQuestion(model, victims), DeleteYes, DeleteNo, true, links);

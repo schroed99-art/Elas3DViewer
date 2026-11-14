@@ -212,10 +212,44 @@ Was dabei nicht passieren kann: Scheitert irgendein Schritt, oder stimmt der
 Vergleich nicht, kommt die Löschfrage gar nicht erst. Auf dem Rechner bleibt
 dann alles, wie es war.
 
-Grenzen der ersten Fassung:
+#### Mehrere Dateien für eine Modellakte
 
-* Ein Modell ist eine Datei. Mehrere Dateien zu einem Modell zusammenfassen kann
-  der ElasSTLsortierer.
+Ein Modell besteht oft aus mehr als einer Datei — drei Entwürfe derselben
+Lichtbox, ein Deckel zum Topf. Solche Dateien gehören **in eine Akte**, nicht in
+drei: eine Artikelnummer, ein Ordner, die übrigen Dateien daneben.
+
+* **Anhaken.** Jede Modelldatei der Liste trägt rechts ein Kästchen. Das
+  **geöffnete** Modell ist die Hauptdatei; angehakt wird, was dazugehört. Das
+  Kästchen wählt nicht aus — ein Klick darauf lädt das Modell nicht, sonst
+  wechselte mit jedem Haken die Hauptdatei. Unter der Liste steht, wie viele
+  angehakt sind; *Häkchen aufheben* im Kontextmenü nimmt alle zurück. Die Haken
+  gelten für den Ordner, in dem sie gesetzt wurden.
+* **Übernehmen.** *Ins PrintFlow …* zeigt unter dem Titelbild die **Dateien
+  dieser Akte**: die Hauptdatei und, mit „dazu", die angehakten. Die Hauptdatei
+  heißt drüben wie das Modell, die übrigen behalten ihren Namen. Trüge eine von
+  ihnen schon genau diesen Namen, wird vor dem Hochladen nachgefragt.
+* **Bilder.** Jede weitere Datei bekommt ihr eigenes Vorschaubild, in der
+  Blickrichtung, die gerade steht, ohne Logo. Dafür wird jede einmal geladen —
+  wie bei *Alle als JPG*; danach steht wieder die Hauptdatei in der Ansicht. In
+  ElasPrintFlow stehen die Dateien unter **Quelldateien & Varianten**, dort
+  liegt das Bild als `<Datei>.vorschau.png` daneben.
+* **Prüfung und Aufräumen** gelten für **alle** Dateien: Jede wird Byte für Byte
+  verglichen, und die Löschfrage nennt jede einzeln samt gleichnamigem Bild.
+  Stimmt eine nicht, bleibt alles auf diesem Rechner.
+
+Kein eigener Weg in ElasPrintFlow: Die Dateien reisen einzeln nach „Vom Rechner"
+(jede bis 300 MB) und werden mit **einem** Aufruf als ein Modell angelegt — der
+Import dort nimmt seit jeher mehrere Dateien mit einer Hauptdatei an.
+
+Grenzen:
+
+* Nur beim **Anlegen**. An eine Akte, die es in ElasPrintFlow schon gibt, hängt
+  Elas3DView nichts an — das geht dort unter „Quelldateien & Varianten".
+* Die Hauptdatei ist immer das geöffnete Modell. Soll es eine andere sein:
+  dieses Modell öffnen, das bisherige anhaken. Nachträglich lässt sie sich in
+  der Modellakte wechseln.
+* Die weiteren Dateien sind **Ablage**, keine Ausführungen für den Laden: kein
+  eigener Preis, keine eigene Größe.
 * Höchstens 300 MB je Datei — mehr nimmt ElasPrintFlow in einem Stück nicht an.
 * Ein schon vorhandenes JPG neben dem Modell wird nicht mit hochgeladen; das
   Titelbild entsteht bei der Übernahme neu. Gelöscht wird das JPG trotzdem mit.

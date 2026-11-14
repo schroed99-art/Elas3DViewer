@@ -49,11 +49,21 @@ namespace Elas3DView
     /// </summary>
     public static class AppVersion
     {
-        public const string Current = "1.3.0";
+        public const string Current = "1.4.0";
 
         /// <summary>Neueste zuerst. Der erste Eintrag gehört zu <see cref="Current"/>.</summary>
         public static readonly ReleaseNote[] Notes =
         {
+            new ReleaseNote("1.4.0", "14.11.2026",
+                "Neu: mehrere Dateien für EINE Modellakte. In der Dateiliste rechts anhaken, was " +
+                    "zum geöffneten Modell gehört — bei „Ins PrintFlow …“ gehen diese STL und 3MF " +
+                    "mit in seinen Ordner, ohne eigene Artikelnummer.",
+                "Das geöffnete Modell ist die Hauptdatei. Das Übernahme-Fenster zeigt, welche " +
+                    "Dateien in die Akte gehen.",
+                "Jede weitere Datei bekommt ihr eigenes Vorschaubild. In ElasPrintFlow stehen sie " +
+                    "unter „Quelldateien & Varianten“.",
+                "Der Vergleich Byte für Byte und die Löschfrage gelten für alle Dateien der Akte."),
+
             new ReleaseNote("1.3.0", "14.11.2026",
                 "Die Version steht oben im Kopfband. Ein Klick darauf zeigt, was sich geändert hat.",
                 "Nach der Übernahme sind Artikelnummer und Ablageort Links: zum Modell in " +

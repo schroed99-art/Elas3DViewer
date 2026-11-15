@@ -50,6 +50,51 @@ namespace Elas3DView
 
         /// <summary>Vorschaubilder, die sich nicht ablegen ließen. Die Dateien selbst liegen trotzdem da.</summary>
         public int PicturesFailed;
+
+        /// <summary>
+        /// Es wurde nichts angelegt: Die Dateien sind an eine BESTEHENDE Akte
+        /// gegangen (Tristan, 15.11.2026). ExtraNames nennt dann, was dazugekommen
+        /// ist — unter dem Namen, den die Datei im Ordner der Akte trägt.
+        /// </summary>
+        public bool Attached;
+
+        /// <summary>
+        /// Beim Anhängen: Dateien, die in der Akte schon lagen, Byte für Byte
+        /// gleich. Sie sind nicht noch einmal hinübergegangen.
+        /// </summary>
+        public List<string> AlreadyThere = new List<string>();
+    }
+
+    /// <summary>Ein Modell, das ElasPrintFlow schon führt — ein Treffer der Suche.</summary>
+    public class PrintFlowHit
+    {
+        public int Id;
+        public string Name;
+        public string Category;
+        public string ArticleNumber;
+
+        /// <summary>Wo das Titelbild liegt, wie ElasPrintFlow es führt; null, wenn die Akte keines hat.</summary>
+        public string PreviewPath;
+    }
+
+    public class PrintFlowSearch
+    {
+        public List<PrintFlowHit> Hits = new List<PrintFlowHit>();
+
+        /// <summary>ElasPrintFlow liefert höchstens 20 Treffer; es kann also mehr geben, als hier stehen.</summary>
+        public bool More;
+    }
+
+    /// <summary>Eine Quelldatei, die schon im Ordner einer Akte liegt.</summary>
+    public class PrintFlowStored
+    {
+        public string Name;
+
+        /// <summary>Der Pfad, wie der Server ihn führt — für den Abruf und für die Rücknahme.</summary>
+        public string Path;
+
+        public long Size;
+        public bool IsMain;
     }
 
     /// <summary>
@@ -309,28 +354,143 @@ namespace Elas3DView
         /// einer Datei, die danach doch abgelehnt würde. Groß- und Kleinschreibung
         /// zählen nicht — auf der Freigabe wäre es derselbe Ordner.
         /// </summary>
-        /// <returns>Artikelnummer des vorhandenen Modells, sonst null.</returns>
-        public async Task<string> FindDuplicate(string name, string category, CancellationToken ct)
+        /// <returns>Das vorhandene Modell, sonst null.</returns>
+        public async Task<PrintFlowHit> FindExisting(string name, string category, CancellationToken ct)
         {
             string clean = CleanName(name);
             string cat = CleanName(category);
-            string query = SearchTerm(clean);
-            if (query.Length < 2) return null;
+
+            List<PrintFlowHit> hits = await Ask(SearchTerm(clean), ct, true).ConfigureAwait(false);
+            if (hits == null) return null;
+            foreach (PrintFlowHit h in hits)
+                if (string.Equals(h.Name, clean, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(h.Category, cat, StringComparison.OrdinalIgnoreCase))
+                    return h;
+            return null;
+        }
+
+        /// <summary>Mehr als so viele Treffer liefert die Suche von ElasPrintFlow nicht.</summary>
+        public const int SearchLimit = 20;
+
+        /// <summary>
+        /// Sucht in den Modellen von ElasPrintFlow nach Name oder Artikelnummer —
+        /// für den, der wissen will, ob es ein Modell dort schon gibt, auch unter
+        /// anderem Namen (Tristan, 15.11.2026).
+        /// </summary>
+        public async Task<PrintFlowSearch> Search(string query, CancellationToken ct)
+        {
+            PrintFlowSearch result = new PrintFlowSearch();
+            string q = (query ?? "").Trim();
+            if (q.Length < 2) return result;
+
+            List<PrintFlowHit> hits = await Ask(SearchTerm(q), ct, false).ConfigureAwait(false);
+            result.More = hits.Count >= SearchLimit;
+
+            // Gefragt wurde der Server mit dem Stück ohne Sonderzeichen (siehe
+            // SearchTerm); was der Nutzer wirklich getippt hat, entscheidet hier.
+            foreach (PrintFlowHit h in hits)
+                if (Has(h.Name, q) || Has(h.ArticleNumber, q)) result.Hits.Add(h);
+            return result;
+        }
+
+        private static bool Has(string text, string part)
+        {
+            return text != null && text.IndexOf(part, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <param name="soft">
+        /// Für die Vorabprüfung des Namens: Eine unverständliche Antwort ist dort
+        /// kein Fehler — die harte Prüfung macht ElasPrintFlow beim Anlegen.
+        /// </param>
+        private async Task<List<PrintFlowHit>> Ask(string term, CancellationToken ct, bool soft)
+        {
+            List<PrintFlowHit> hits = new List<PrintFlowHit>();
+            if (term == null || term.Trim().Length < 2) return soft ? null : hits;
 
             Reply r = await Send(HttpMethod.Get,
-                                 "api/models/suche?alles=1&q=" + Uri.EscapeDataString(query),
+                                 "api/models/suche?alles=1&q=" + Uri.EscapeDataString(term.Trim()),
                                  null, 25, ct, false).ConfigureAwait(false);
             IList list = List(r.Object, "modelle");
-            if (!r.Ok || list == null) return null;
+            if (!r.Ok || list == null)
+            {
+                if (soft) return null;
+                throw new PrintFlowException(r.Error("Die Suche in ElasPrintFlow ist fehlgeschlagen."));
+            }
 
             foreach (object o in list)
             {
                 Dictionary<string, object> m = o as Dictionary<string, object>;
-                if (string.Equals(Str(m, "name"), clean, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(Str(m, "category"), cat, StringComparison.OrdinalIgnoreCase))
-                    return Str(m, "article_number") ?? "";
+                int id;
+                if (m == null || !int.TryParse(Str(m, "id"), NumberStyles.Integer, CultureInfo.InvariantCulture, out id))
+                    continue;
+                PrintFlowHit h = new PrintFlowHit();
+                h.Id = id;
+                h.Name = Str(m, "name") ?? "";
+                h.Category = Str(m, "category") ?? "";
+                h.ArticleNumber = Str(m, "article_number") ?? "";
+                string preview = Str(m, "preview_path");
+                h.PreviewPath = string.IsNullOrEmpty(preview) ? null : preview;
+                hits.Add(h);
             }
-            return null;
+            return hits;
+        }
+
+        /// <summary>
+        /// Das Titelbild einer Akte als Bilddatei, wie ElasPrintFlow es ausliefert;
+        /// null, wenn sie keines hat oder es sich nicht holen lässt. Ein fehlendes
+        /// Bild ist kein Fehler — der Treffer steht dann ohne Bild in der Liste.
+        /// </summary>
+        public async Task<byte[]> Picture(string previewPath, CancellationToken ct)
+        {
+            if (string.IsNullOrEmpty(previewPath)) return null;
+            try
+            {
+                using (CancellationTokenSource limit = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    limit.CancelAfter(TimeSpan.FromSeconds(40));
+                    using (HttpResponseMessage res = await _http.GetAsync(
+                               new Uri(_base, "api/models/preview-image?path=" + Uri.EscapeDataString(previewPath)),
+                               limit.Token).ConfigureAwait(false))
+                    {
+                        if (!res.IsSuccessStatusCode) return null;
+                        return await res.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                if (ct.IsCancellationRequested) throw new OperationCanceledException();
+                return null;
+            }
+        }
+
+        /// <summary>Die Quelldateien im Ordner einer Akte, die Hauptdatei zuerst.</summary>
+        public async Task<List<PrintFlowStored>> StoredFiles(int modelId, CancellationToken ct)
+        {
+            Reply r = await Send(HttpMethod.Get, "api/models/variants?modelId=" + modelId, null, 60, ct, false)
+                            .ConfigureAwait(false);
+            IList list = List(r.Object, "files");
+            if (!r.Ok || list == null)
+                throw new PrintFlowException(r.Error("Die Dateien der Akte ließen sich nicht lesen."));
+
+            List<PrintFlowStored> files = new List<PrintFlowStored>();
+            foreach (object o in list)
+            {
+                Dictionary<string, object> d = o as Dictionary<string, object>;
+                string name = Str(d, "name");
+                if (string.IsNullOrEmpty(name)) continue;
+
+                PrintFlowStored s = new PrintFlowStored();
+                s.Name = name;
+                s.Path = Str(d, "path");
+                long size;
+                long.TryParse(Str(d, "size"), NumberStyles.Integer, CultureInfo.InvariantCulture, out size);
+                s.Size = size;
+                object main;
+                s.IsMain = d.TryGetValue("isMain", out main) && main is bool && (bool)main;
+                files.Add(s);
+            }
+            return files;
         }
 
         /// <summary>
@@ -395,7 +555,8 @@ namespace Elas3DView
                         : "Datei " + (i + 1) + " von " + total + " wird hochgeladen …";
 
                     Reply up;
-                    using (UploadContent body = new UploadContent(locals[i], fileName, folder, label, progress, ct))
+                    using (UploadContent body = new UploadContent(locals[i], fileName, "ordner", folder, "dateien",
+                                                                  label, progress, ct))
                         up = await Send(HttpMethod.Post, "api/models/hochladen-lokal", body, 0, ct, false)
                                    .ConfigureAwait(false);
 
@@ -584,6 +745,214 @@ namespace Elas3DView
             return model;
         }
 
+        // ------------------------------------------------------------ Anhängen
+
+        /// <summary>
+        /// Legt Dateien in den Ordner einer BESTEHENDEN Akte (Tristan, 15.11.2026:
+        /// „das Modell den gewählten hinzufügen — der gleiche Prozess, wie wenn ich
+        /// mehrere Modelle markiert habe"). Kein neues Modell, keine neue
+        /// Artikelnummer; Titelbild, Name und Hauptdatei der Akte bleiben.
+        ///
+        ///   1. Lesen, was im Ordner schon liegt        GET  /api/models/variants
+        ///   2. Jede Datei hochladen                    POST /api/models/variants
+        ///   3. Ihr Vorschaubild danebenlegen           POST /api/models/variants/bild
+        ///   4. Byte für Byte vergleichen               GET  /api/models/variant-file
+        ///
+        /// LIEGT DORT SCHON EINE DATEI GLEICHEN NAMENS, wird sie zuerst verglichen.
+        /// Ist sie dieselbe, geht nichts noch einmal hinüber — sie zählt als
+        /// nachgewiesen. Ist sie eine andere, kommt die neue als „Name (2)" dazu;
+        /// der Server hängte sonst still einen Zeitstempel an.
+        ///
+        /// Wirft, solange nichts in der Akte geblieben ist: Bricht das Hochladen
+        /// ab, gehen die schon abgelegten Dateien dieser Übernahme wieder weg.
+        /// </summary>
+        /// <param name="files">Was dazukommt; jede mit ihrem Vorschaubild, sofern es eines gibt.</param>
+        public async Task<PrintFlowModel> Attach(PrintFlowHit target, IList<PrintFlowFile> files,
+                                                 IProgress<PrintFlowProgress> progress, CancellationToken ct)
+        {
+            int total = files.Count;
+            PrintFlowModel model = new PrintFlowModel();
+            model.Attached = true;
+            model.Id = target.Id;
+            model.Name = target.Name;
+            model.Category = target.Category;
+            model.ArticleNumber = target.ArticleNumber;
+
+            // 1. Was liegt schon da?
+            Report(progress, "Akte wird gelesen …");
+            List<PrintFlowStored> before = await StoredFiles(target.Id, ct).ConfigureAwait(false);
+            HashSet<string> taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (PrintFlowStored s in before) taken.Add(s.Name);
+
+            string[] storeAs = new string[total];       // null = liegt schon gleich da
+            for (int i = 0; i < total; i++)
+            {
+                string name = Path.GetFileName(files[i].Path);
+                PrintFlowStored same = null;
+                foreach (PrintFlowStored s in before)
+                    if (string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)) same = s;
+
+                if (same != null)
+                {
+                    bool identical = false;
+                    if (same.Size == new FileInfo(files[i].Path).Length && !string.IsNullOrEmpty(same.Path))
+                    {
+                        string label = "„" + name + "“ liegt dort schon — wird verglichen …";
+                        Report(progress, label);
+                        identical = await Compare(VariantUri(same.Path), files[i].Path, label, progress)
+                                          .ConfigureAwait(false) == null;
+                    }
+                    if (identical)
+                    {
+                        model.AlreadyThere.Add(same.Name);
+                        continue;
+                    }
+                    name = FreeName(name, taken);
+                }
+                taken.Add(name);
+                storeAs[i] = name;
+            }
+
+            int toSend = 0;
+            foreach (string s in storeAs) if (s != null) toSend++;
+
+            // 2. Hochladen — jede Datei als eigene Anfrage, unter dem Namen, den sie dort tragen soll
+            string[] storedName = new string[total];
+            List<string> uploaded = new List<string>();
+            Exception failure = null;
+            try
+            {
+                int n = 0;
+                for (int i = 0; i < total; i++)
+                {
+                    if (storeAs[i] == null) continue;
+                    n++;
+                    string label = toSend == 1
+                        ? "Datei wird hochgeladen …"
+                        : "Datei " + n + " von " + toSend + " wird hochgeladen …";
+
+                    Reply up;
+                    using (UploadContent body = new UploadContent(
+                               files[i].Path, storeAs[i], "modelId",
+                               target.Id.ToString(CultureInfo.InvariantCulture), "files", label, progress, ct))
+                        up = await Send(HttpMethod.Post, "api/models/variants", body, 0, ct, false)
+                                   .ConfigureAwait(false);
+
+                    IList names = List(up.Object, "uploaded");
+                    if (!up.Ok || names == null || names.Count != 1)
+                    {
+                        string why = up.Error("ElasPrintFlow hat die Datei nicht angenommen.");
+                        throw new PrintFlowException(toSend == 1 ? why : Path.GetFileName(files[i].Path) + ": " + why);
+                    }
+                    storedName[i] = Convert.ToString(names[0], CultureInfo.InvariantCulture);
+                    uploaded.Add(storedName[i]);
+                }
+            }
+            catch (Exception ex) { failure = ex; }
+
+            if (failure != null)
+            {
+                await TakeBack(target.Id, uploaded).ConfigureAwait(false);
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            }
+
+            // Ab hier liegen die Dateien in der Akte.
+            foreach (string s in uploaded) model.ExtraNames.Add(s);
+
+            // 3. Nachlesen: der Ordner der Akte und die Pfade, unter denen die Dateien jetzt liegen
+            List<PrintFlowStored> after = null;
+            try
+            {
+                Reply single = await Send(HttpMethod.Get, "api/models/single?id=" + model.Id, null, 60,
+                                          CancellationToken.None, false).ConfigureAwait(false);
+                if (single.Ok && single.Object != null)
+                {
+                    model.Name = Str(single.Object, "name") ?? model.Name;
+                    model.Category = Str(single.Object, "category") ?? model.Category;
+                    model.ArticleNumber = Str(single.Object, "article_number") ?? model.ArticleNumber;
+                    model.NasPath = Str(single.Object, "nas_path");
+                }
+                if (uploaded.Count > 0)
+                    after = await StoredFiles(model.Id, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (PrintFlowException) { }
+
+            // 4. Die Bilder — eine Zugabe wie beim Anlegen: Scheitert eines, liegt die Datei trotzdem da.
+            if (uploaded.Count > 0)
+            {
+                Report(progress, "Vorschaubilder werden abgelegt …");
+                for (int i = 0; i < total; i++)
+                {
+                    if (storedName[i] == null || files[i].PicturePng == null) continue;
+                    if (!await SetVariantPicture(model.Id, storedName[i], files[i].PicturePng).ConfigureAwait(false))
+                        model.PicturesFailed++;
+                }
+            }
+
+            // 5. Jede abgelegte Datei gegen die lokale halten
+            int k = 0;
+            for (int i = 0; i < total && model.VerifyProblem == null; i++)
+            {
+                if (storedName[i] == null) continue;
+                k++;
+                string label = uploaded.Count == 1
+                    ? "Ablage auf der NAS wird geprüft …"
+                    : "Ablage auf der NAS wird geprüft (" + k + " von " + uploaded.Count + ") …";
+                Report(progress, label);
+
+                PrintFlowStored where = null;
+                if (after != null)
+                    foreach (PrintFlowStored s in after)
+                        if (string.Equals(s.Name, storedName[i], StringComparison.OrdinalIgnoreCase)) where = s;
+
+                string problem = where == null || string.IsNullOrEmpty(where.Path)
+                    ? "ElasPrintFlow führt die Datei in der Akte nicht."
+                    : await Compare(VariantUri(where.Path), files[i].Path, label, progress).ConfigureAwait(false);
+                if (problem != null)
+                    model.VerifyProblem = total == 1 ? problem : storedName[i] + ": " + problem;
+            }
+            model.Verified = model.VerifyProblem == null;
+            return model;
+        }
+
+        private Uri VariantUri(string storedPath)
+        {
+            return new Uri(_base, "api/models/variant-file?path=" + Uri.EscapeDataString(storedPath));
+        }
+
+        /// <summary>„Vase.stl" → „Vase (2).stl", solange der Name im Ordner vergeben ist.</summary>
+        internal static string FreeName(string name, ICollection<string> taken)
+        {
+            string ext = Path.GetExtension(name);
+            string stem = Path.GetFileNameWithoutExtension(name);
+            for (int n = 2; n < 10000; n++)
+            {
+                string candidate = stem + " (" + n + ")" + ext;
+                if (!taken.Contains(candidate)) return candidate;
+            }
+            return stem + " " + Guid.NewGuid().ToString("N").Substring(0, 6) + ext;
+        }
+
+        /// <summary>
+        /// Nimmt zurück, was diese Übernahme eben in die Akte gelegt hat — nur das,
+        /// dem Namen nach, und nie die Hauptdatei. Gelingt es nicht, bleibt es liegen.
+        /// </summary>
+        private async Task TakeBack(int modelId, List<string> names)
+        {
+            if (names.Count == 0) return;
+            try
+            {
+                List<PrintFlowStored> now = await StoredFiles(modelId, CancellationToken.None).ConfigureAwait(false);
+                foreach (PrintFlowStored s in now)
+                {
+                    if (s.IsMain || string.IsNullOrEmpty(s.Path) || !names.Contains(s.Name)) continue;
+                    await Send(HttpMethod.Delete, "api/models/variants", JsonBody(Map("filePath", s.Path)),
+                               60, CancellationToken.None, false).ConfigureAwait(false);
+                }
+            }
+            catch (PrintFlowException) { }
+        }
+
         /// <summary>Legt das Bild einer Quelldatei neben sie (dort Name.vorschau.png).</summary>
         private async Task<bool> SetVariantPicture(int id, string storedName, byte[] png)
         {
@@ -753,8 +1122,14 @@ namespace Elas3DView
             private readonly CancellationToken _ct;
             private readonly string _label;
 
+            /// <param name="textField">
+            /// Das Begleitfeld der Anfrage: „ordner" beim Ablegen unter „Vom Rechner",
+            /// „modelId" beim Anhängen an eine Akte.
+            /// </param>
+            /// <param name="fileField">Wie das Dateifeld drüben heißt: „dateien" oder „files".</param>
             /// <param name="label">Was der Nutzer liest; die Prozentzahl kommt dahinter.</param>
-            public UploadContent(string path, string fileName, string folder, string label,
+            public UploadContent(string path, string fileName, string textField, string textValue,
+                                 string fileField, string label,
                                  IProgress<PrintFlowProgress> progress, CancellationToken ct)
             {
                 _progress = progress;
@@ -767,10 +1142,10 @@ namespace Elas3DView
 
                 StringBuilder head = new StringBuilder();
                 head.Append("--").Append(boundary).Append("\r\n");
-                head.Append("Content-Disposition: form-data; name=\"ordner\"\r\n\r\n");
-                head.Append(folder).Append("\r\n");
+                head.Append("Content-Disposition: form-data; name=\"").Append(textField).Append("\"\r\n\r\n");
+                head.Append(textValue).Append("\r\n");
                 head.Append("--").Append(boundary).Append("\r\n");
-                head.Append("Content-Disposition: form-data; name=\"dateien\"; filename=\"")
+                head.Append("Content-Disposition: form-data; name=\"").Append(fileField).Append("\"; filename=\"")
                     .Append(safeName).Append("\"\r\n");
                 head.Append("Content-Type: application/octet-stream\r\n\r\n");
 

@@ -2700,6 +2700,7 @@ namespace Elas3DView
 
             string name = Path.GetFileNameWithoutExtension(file);
             string category = _pfCategory;
+            PrintFlowHit attachTo = null;       // eine BESTEHENDE Akte statt eines neuen Modells
 
             while (true)
             {
@@ -2728,6 +2729,14 @@ namespace Elas3DView
                     if (categories == null) return;
                     continue;
                 }
+                if (dlg.SearchExisting)
+                {
+                    // Kein neues Modell: in den vorhandenen suchen und dort anhängen.
+                    attachTo = PickExisting(what + "  ·  " + FormatBytes(allBytes), name, picture,
+                                            Path.GetFileName(file), null);
+                    if (attachTo == null) continue;     // „Zurück"
+                    break;
+                }
                 if (!accepted) return;
                 if (!ContrastOkay("Trotzdem übernehmen", true)) continue;
 
@@ -2751,9 +2760,9 @@ namespace Elas3DView
                 // Vorab fragen, ob es Name und Kategorie schon gibt — sonst reist
                 // die Datei erst hinüber und wird dort abgelehnt.
                 ShowBusy("Name wird geprüft …", false);
-                string taken = null;
+                PrintFlowHit taken = null;
                 PrintFlowException problem = null;
-                try { taken = await _pf.FindDuplicate(name, category, System.Threading.CancellationToken.None); }
+                try { taken = await _pf.FindExisting(name, category, System.Threading.CancellationToken.None); }
                 catch (Exception ex) { problem = ex as PrintFlowException ?? new PrintFlowException(ex.Message); }
                 HideBusy();
 
@@ -2770,13 +2779,21 @@ namespace Elas3DView
                 }
                 if (taken != null)
                 {
-                    AppDialog.Warn(this, "Name schon vergeben",
-                        "„" + name + "“ gibt es in der Kategorie „" + category + "“ schon" +
-                        (taken.Length > 0 ? " (Artikelnummer " + taken + ")" : "") + ".\n\n" +
-                        "Bitte einen anderen Namen oder eine andere Kategorie wählen.");
-                    continue;
+                    // Den Namen gibt es dort schon (Tristan, 15.11.2026): an die
+                    // bestehende Akte anhängen — oder zurück und dem neuen Modell
+                    // einen anderen Namen geben. Die Akte steht mit ihrem Bild da;
+                    // ob es dasselbe Modell ist, sieht man, bevor man entscheidet.
+                    attachTo = PickExisting(what, taken.Name, picture, Path.GetFileName(file), taken);
+                    if (attachTo == null) continue;     // „Anderer Name"
+                    break;
                 }
                 break;
+            }
+
+            if (attachTo != null)
+            {
+                await AttachToExisting(file, extraPaths, attachTo);
+                return;
             }
             _pfCategory = category;
 
@@ -2798,46 +2815,174 @@ namespace Elas3DView
             byte[] mainPicture = null;
             if (extraPaths.Count > 0)
             {
-                bool stopped = false;
-                ShowBusy("Vorschaubilder werden erzeugt …", true);
-                await Task.Delay(1);
-                try
-                {
-                    try { mainPicture = EncodePng(RenderPictogram()); } catch { mainPicture = null; }
-
-                    for (int i = 0; i < extraPaths.Count; i++)
-                    {
-                        if (_cancelRequested) { stopped = true; break; }
-                        string p = extraPaths[i];
-                        BusyText(string.Format("Vorschaubild {0} / {1}   {2}", i + 1, extraPaths.Count, Path.GetFileName(p)));
-                        await Task.Delay(1);
-
-                        PrintFlowFile one = new PrintFlowFile();
-                        one.Path = p;
-                        try
-                        {
-                            LoadedModel m = await Task.Run<LoadedModel>(delegate { return MeshLoader.Load(p); });
-                            one.PicturePng = PictogramOf(m);
-                        }
-                        catch { one.PicturePng = null; }    // die Datei geht trotzdem mit, nur ohne Bild
-                        extras.Add(one);
-                    }
-                    if (_cancelRequested) stopped = true;
-                }
-                finally { HideBusy(); }
-
-                // Zurück zur Hauptdatei — sie ist das Modell, um das es geht.
-                _currentFile = null;
-                await LoadFile(file);
-
-                if (stopped)
+                PictogramRun run = await RenderPictograms(file, extraPaths);
+                if (run.Stopped)
                 {
                     Toast("Übernahme abgebrochen — nichts angelegt, nichts gelöscht", false);
                     return;
                 }
+                extras = run.Extras;
+                mainPicture = run.Main;
             }
 
-            ShowBusy("Datei wird hochgeladen …", true);
+            PrintFlowModel model = await RunTransfer(
+                "Datei wird hochgeladen …", "Übernahme abgebrochen — nichts angelegt, nichts gelöscht",
+                delegate(IProgress<PrintFlowProgress> progress, System.Threading.CancellationToken ct)
+                {
+                    return _pf.Import(file, name, category, png, extras, mainPicture, progress, ct);
+                });
+            if (model == null) return;
+
+            FinishTransfer(file, extraPaths, model);
+        }
+
+        /// <summary>
+        /// Zeigt die Suche in den Modellen von ElasPrintFlow — oder, wenn der Name
+        /// schon vergeben ist, gleich die Akte dieses Namens.
+        /// </summary>
+        /// <param name="preset">Die Akte mit dem vergebenen Namen; null bei freier Suche.</param>
+        /// <returns>Die Akte, an die angehängt werden soll; null, wenn der Nutzer zurück will.</returns>
+        private PrintFlowHit PickExisting(string what, string query, BitmapSource mine, string mineInfo,
+                                          PrintFlowHit preset)
+        {
+            string caption = preset == null
+                ? what + "   —   in ElasPrintFlow nachsehen, ob es das Modell schon gibt, und dort anhängen."
+                : "„" + preset.Name + "“ gibt es in der Kategorie „" + preset.Category + "“ schon. " +
+                  "An diese Akte anhängen — oder zurück und dem neuen Modell einen anderen Namen geben.";
+
+            PrintFlowSearchDialog dlg = new PrintFlowSearchDialog(
+                caption, query, mine, mineInfo, preset == null ? "Zurück" : "Anderer Name", preset,
+                delegate(string q, System.Threading.CancellationToken ct) { return _pf.Search(q, ct); },
+                delegate(PrintFlowHit h, System.Threading.CancellationToken ct) { return _pf.Picture(h.PreviewPath, ct); });
+            return dlg.ShowOver(this) ? dlg.Chosen : null;
+        }
+
+        /// <summary>
+        /// Hängt das geöffnete Modell samt den angehakten Dateien an eine Akte, die
+        /// ElasPrintFlow schon führt — derselbe Vorgang wie bei den Häkchen, nur
+        /// dass die Akte nicht neu entsteht: Jede Datei bekommt ihr Vorschaubild,
+        /// keine eine Artikelnummer, danach Vergleich und Löschfrage wie immer.
+        /// </summary>
+        private async Task AttachToExisting(string file, List<string> extraPaths, PrintFlowHit target)
+        {
+            // Liegt dort schon etwas gleichen Namens? Vorher sagen, was dann geschieht.
+            ShowBusy("Akte wird gelesen …", false);
+            List<PrintFlowStored> stored = null;
+            PrintFlowException problem = null;
+            try { stored = await _pf.StoredFiles(target.Id, System.Threading.CancellationToken.None); }
+            catch (Exception ex) { problem = ex as PrintFlowException ?? new PrintFlowException(ex.Message); }
+            HideBusy();
+            if (problem != null)
+            {
+                if (problem.NeedLogin) _pfSession = "";
+                AppDialog.Error(this, "ElasPrintFlow", problem.Message + "\n\nAuf diesem Rechner ist nichts verändert.");
+                return;
+            }
+
+            List<string> all = new List<string>();
+            all.Add(file);
+            all.AddRange(extraPaths);
+            string same = "";
+            foreach (string p in all)
+                foreach (PrintFlowStored s in stored)
+                    if (string.Equals(s.Name, Path.GetFileName(p), StringComparison.OrdinalIgnoreCase))
+                        same += "\n•  " + s.Name;
+            if (same.Length > 0 && !AppDialog.Ask(this, DlgKind.Question,
+                    "In der Akte liegt schon eine Datei dieses Namens",
+                    "In „" + target.Name + "“ liegt bereits:" + same + "\n\n" +
+                    "Ist die Datei dort dieselbe, geht sie nicht noch einmal hinüber. " +
+                    "Ist sie eine andere, kommt die neue mit dem Zusatz „(2)“ dazu. " +
+                    "Überschrieben wird nichts.",
+                    "Fortfahren", "Abbrechen", false))
+                return;
+
+            // Jede Datei bekommt ihr Bild für die Variantenliste — auch die geöffnete:
+            // Sie ist in der fremden Akte eine Datei unter mehreren.
+            PictogramRun run = await RenderPictograms(file, extraPaths);
+            if (run.Stopped)
+            {
+                Toast("Übernahme abgebrochen — nichts angehängt, nichts gelöscht", false);
+                return;
+            }
+            List<PrintFlowFile> files = new List<PrintFlowFile>();
+            PrintFlowFile head = new PrintFlowFile();
+            head.Path = file;
+            head.PicturePng = run.Main;
+            files.Add(head);
+            files.AddRange(run.Extras);
+
+            PrintFlowModel model = await RunTransfer(
+                "Akte wird gelesen …", "Übernahme abgebrochen — nichts angehängt, nichts gelöscht",
+                delegate(IProgress<PrintFlowProgress> progress, System.Threading.CancellationToken ct)
+                {
+                    return _pf.Attach(target, files, progress, ct);
+                });
+            if (model == null) return;
+
+            FinishTransfer(file, extraPaths, model);
+        }
+
+        private sealed class PictogramRun
+        {
+            public byte[] Main;
+            public List<PrintFlowFile> Extras = new List<PrintFlowFile>();
+            public bool Stopped;
+        }
+
+        /// <summary>
+        /// Die Bilder für die Variantenliste: das der geöffneten Datei und eines je
+        /// weiterer Datei, in der Blickrichtung, die steht. Dazu wird jede weitere
+        /// einmal geladen — wie bei „Alle als JPG"; danach steht wieder die
+        /// geöffnete da.
+        /// </summary>
+        private async Task<PictogramRun> RenderPictograms(string file, List<string> extraPaths)
+        {
+            PictogramRun run = new PictogramRun();
+            ShowBusy("Vorschaubilder werden erzeugt …", extraPaths.Count > 0);
+            await Task.Delay(1);
+            try
+            {
+                try { run.Main = EncodePng(RenderPictogram()); } catch { run.Main = null; }
+
+                for (int i = 0; i < extraPaths.Count; i++)
+                {
+                    if (_cancelRequested) { run.Stopped = true; break; }
+                    string p = extraPaths[i];
+                    BusyText(string.Format("Vorschaubild {0} / {1}   {2}", i + 1, extraPaths.Count, Path.GetFileName(p)));
+                    await Task.Delay(1);
+
+                    PrintFlowFile one = new PrintFlowFile();
+                    one.Path = p;
+                    try
+                    {
+                        LoadedModel m = await Task.Run<LoadedModel>(delegate { return MeshLoader.Load(p); });
+                        one.PicturePng = PictogramOf(m);
+                    }
+                    catch { one.PicturePng = null; }    // die Datei geht trotzdem mit, nur ohne Bild
+                    run.Extras.Add(one);
+                }
+                if (_cancelRequested) run.Stopped = true;
+            }
+            finally { HideBusy(); }
+
+            // Zurück zur geöffneten Datei — sie ist das Modell, um das es geht.
+            if (extraPaths.Count > 0)
+            {
+                _currentFile = null;
+                await LoadFile(file);
+            }
+            return run;
+        }
+
+        /// <summary>
+        /// Der Rahmen um jede Übergabe: Hinweis mit Fortschritt und Abbrechen,
+        /// danach die Meldung, falls abgebrochen wurde oder es scheiterte.
+        /// </summary>
+        /// <returns>Das Ergebnis; null, wenn es keines gibt — dann ist schon gesagt, warum.</returns>
+        private async Task<PrintFlowModel> RunTransfer(string firstText, string canceledText,
+            Func<IProgress<PrintFlowProgress>, System.Threading.CancellationToken, Task<PrintFlowModel>> work)
+        {
+            ShowBusy(firstText, true);
             _pfCancel = new System.Threading.CancellationTokenSource();
             bool live = true;
             Progress<PrintFlowProgress> progress = new Progress<PrintFlowProgress>(delegate(PrintFlowProgress p)
@@ -2850,10 +2995,7 @@ namespace Elas3DView
             PrintFlowModel model = null;
             Exception failure = null;
             bool canceled = false;
-            try
-            {
-                model = await _pf.Import(file, name, category, png, extras, mainPicture, progress, _pfCancel.Token);
-            }
+            try { model = await work(progress, _pfCancel.Token); }
             catch (OperationCanceledException) { canceled = true; }
             catch (Exception ex) { failure = ex; }
 
@@ -2865,8 +3007,8 @@ namespace Elas3DView
 
             if (canceled)
             {
-                Toast("Übernahme abgebrochen — nichts angelegt, nichts gelöscht", false);
-                return;
+                Toast(canceledText, false);
+                return null;
             }
             if (failure != null)
             {
@@ -2874,10 +3016,9 @@ namespace Elas3DView
                 if (pfx != null && pfx.NeedLogin) _pfSession = "";
                 AppDialog.Error(this, "Übernahme fehlgeschlagen",
                     failure.Message + "\n\nAuf diesem Rechner ist nichts verändert.");
-                return;
+                return null;
             }
-
-            FinishTransfer(file, extraPaths, model);
+            return model;
         }
 
         /// <summary>
@@ -3080,6 +3221,8 @@ namespace Elas3DView
         /// <summary>Was angelegt wurde: Name, Artikelnummer, Kategorie und der Ordner auf der NAS.</summary>
         internal static string TransferSummary(PrintFlowModel model)
         {
+            if (model.Attached) return AttachSummary(model);
+
             string head = "„" + model.Name + "“ liegt jetzt in ElasPrintFlow.\n\n" +
                           "Artikelnummer:  " + (string.IsNullOrEmpty(model.ArticleNumber) ? "–" : model.ArticleNumber) + "\n" +
                           "Kategorie:  " + model.Category;
@@ -3100,13 +3243,56 @@ namespace Elas3DView
         {
             string list = "";
             foreach (string p in victims) list += "\n•  " + Path.GetFileName(p);
-            int files = 1 + (model.ExtraNames == null ? 0 : model.ExtraNames.Count);
-            return TransferSummary(model) + "\n\n" +
-                   (files == 1
+            int files = model.Attached
+                ? model.ExtraNames.Count + model.AlreadyThere.Count
+                : 1 + (model.ExtraNames == null ? 0 : model.ExtraNames.Count);
+
+            // Lag beim Anhängen schon alles dort, steht der Nachweis bereits oben.
+            string proof = model.Attached && model.ExtraNames.Count == 0 ? ""
+                : (files == 1
                        ? "Die Datei auf der NAS stimmt Byte für Byte mit der lokalen überein."
-                       : "Alle " + files + " Dateien auf der NAS stimmen Byte für Byte mit den lokalen überein.") +
-                   "\n\nVon diesem Rechner endgültig löschen:" + list + "\n\n" +
+                       : "Alle " + files + " Dateien auf der NAS stimmen Byte für Byte mit den lokalen überein.") + "\n\n";
+
+            return TransferSummary(model) + "\n\n" + proof +
+                   "Von diesem Rechner endgültig löschen:" + list + "\n\n" +
                    "Das geht am Papierkorb vorbei und lässt sich nicht zurückholen.";
+        }
+
+        internal const string AttachedTitle = "Angehängt — hier löschen?";
+        internal const string AlreadyThereTitle = "Liegt dort schon — hier löschen?";
+
+        /// <summary>
+        /// Was beim Anhängen an eine bestehende Akte geschehen ist: was dazukam —
+        /// unter dem Namen, den es dort trägt —, was schon gleich dalag, und wo.
+        /// </summary>
+        private static string AttachSummary(PrintFlowModel model)
+        {
+            int added = model.ExtraNames.Count, there = model.AlreadyThere.Count;
+            string head;
+            if (added == 0)
+            {
+                head = (there == 1 ? "Die Datei lag" : "Alle " + there + " Dateien lagen") +
+                       " in der Akte „" + model.Name + "“ schon — Byte für Byte gleich. " +
+                       "Hochgeladen wurde nichts.";
+            }
+            else
+            {
+                head = "„" + model.Name + "“ hat in ElasPrintFlow jetzt " +
+                       (added == 1 ? "eine weitere Datei:" : added + " weitere Dateien:");
+                foreach (string n in model.ExtraNames) head += "\n•  " + n;
+                if (there > 0)
+                    head += "\n" + (there == 1 ? "Eine Datei lag" : there + " Dateien lagen") +
+                            " dort schon, Byte für Byte gleich.";
+            }
+
+            head += "\n\nArtikelnummer:  " + (string.IsNullOrEmpty(model.ArticleNumber) ? "–" : model.ArticleNumber) +
+                    "\nKategorie:  " + model.Category;
+            if (model.PicturesFailed > 0)
+                head += "\n" + model.PicturesFailed + (model.PicturesFailed == 1
+                    ? " Vorschaubild ließ sich nicht ablegen"
+                    : " Vorschaubilder ließen sich nicht ablegen") + " — in der Modellakte nachholbar";
+            string folder = NasFolder(model.NasPath);
+            return folder == null ? head : head + "\n" + folder;
         }
 
         /// <summary>
@@ -3195,9 +3381,15 @@ namespace Elas3DView
             _marked.Clear();
             UpdateCount();
 
+            // Angelegt oder angehängt — die Meldungen sagen, was von beidem geschah.
+            bool nothingNew = model.Attached && model.ExtraNames.Count == 0;    // lag alles schon gleich dort
+            string done = nothingNew ? "Lag in " + number + " schon"
+                        : model.Attached ? "An " + number + " angehängt"
+                                         : "Übernommen als " + number;
+
             if (!model.Verified)
             {
-                AppDialog.Warn(this, "Angelegt, aber nicht geprüft",
+                AppDialog.Warn(this, model.Attached ? "Angehängt, aber nicht geprüft" : "Angelegt, aber nicht geprüft",
                     TransferSummary(model) + "\n\n" + model.VerifyProblem + "\n\n" +
                     "Die lokalen Dateien bleiben deshalb liegen.", links);
                 return;
@@ -3213,10 +3405,12 @@ namespace Elas3DView
             }
 
             bool delete = victims.Count > 0 && AppDialog.Ask(this, DlgKind.Success,
-                DeleteTitle, DeleteQuestion(model, victims), DeleteYes, DeleteNo, true, links);
+                nothingNew ? AlreadyThereTitle : model.Attached ? AttachedTitle : DeleteTitle,
+                DeleteQuestion(model, victims),
+                DeleteYes, DeleteNo, true, links);
             if (!delete)
             {
-                Toast("Übernommen als " + number + " — lokal behalten", true);
+                Toast(done + " — lokal behalten", true);
                 return;
             }
 
@@ -3258,7 +3452,7 @@ namespace Elas3DView
                     stuck + "\n\nDas Modell liegt trotzdem vollständig in ElasPrintFlow (" + number + ").");
                 return;
             }
-            Toast("Übernommen als " + number + " — hier gelöscht (" + removed +
+            Toast(done + " — hier gelöscht (" + removed +
                   (removed == 1 ? " Datei)" : " Dateien)"), true);
         }
 

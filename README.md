@@ -254,10 +254,46 @@ Kein eigener Weg in ElasPrintFlow: Die Dateien reisen einzeln nach „Vom Rechne
 (jede bis 300 MB) und werden mit **einem** Aufruf als ein Modell angelegt — der
 Import dort nimmt seit jeher mehrere Dateien mit einer Hauptdatei an.
 
+#### An eine bestehende Modellakte anhängen
+
+Nicht jedes Modell ist neu. Oft gibt es in ElasPrintFlow schon eine Akte dazu —
+unter demselben Namen oder einem anderen —, und die Datei gehört **dort hinein**
+statt in ein zweites Modell.
+
+* **Suchen.** Im Übernahme-Fenster führt *An bestehende Akte …* in die Suche.
+  Sie ist mit dem Namen des Modells vorbelegt und sucht sofort; trifft der ganze
+  Name nichts, versucht sie es mit dem ersten Wort. Gesucht wird nach Name oder
+  Artikelnummer, ein Teil genügt, Groß- und Kleinschreibung zählen nicht.
+* **Vergleichen.** Oben stehen zwei Bilder nebeneinander: links das eigene
+  Modell, wie es in der Ansicht steht, rechts das Titelbild der gewählten Akte.
+  Ob es dasselbe ist, sagt kein Name — man sieht es.
+* **Hinzufügen.** *Diesem Modell hinzufügen* (oder ein Doppelklick auf den
+  Treffer) legt die Datei in den Ordner dieser Akte — derselbe Vorgang wie bei
+  den angehakten Dateien: eigenes Vorschaubild, keine eigene Artikelnummer,
+  drüben unter **Quelldateien & Varianten**. Was angehakt ist, geht mit.
+  Titelbild, Name und Hauptdatei der Akte bleiben, wie sie sind. Die
+  Eingabetaste sucht nur; angehängt wird nie nebenbei.
+* **Der Name ist schon vergeben.** Gibt es Name und Kategorie dort schon, kommt
+  statt einer Absage dasselbe Fenster, die Akte dieses Namens schon gewählt:
+  anhängen — oder *Anderer Name* und zurück ins Übernahme-Fenster.
+* **Liegt dort schon eine Datei gleichen Namens,** wird vorher gefragt und dann
+  verglichen. Ist sie **dieselbe**, geht nichts noch einmal hinüber; sie gilt
+  als nachgewiesen, und die Löschfrage kommt trotzdem. Ist sie eine **andere**,
+  kommt die neue als `Name (2).stl` dazu. Überschrieben wird nichts.
+* **Prüfung und Aufräumen** wie immer: Byte für Byte, dann die Löschfrage.
+  Bricht das Hochladen ab, nimmt Elas3DView die schon abgelegten Dateien dieser
+  Übernahme wieder aus der Akte.
+
+Auch das ohne eigenen Weg in ElasPrintFlow: `suche` und `preview-image` für die
+Treffer, `variants` zum Ablegen im Ordner der Akte, `variants/bild` für das
+Vorschaubild, `variant-file` für den Vergleich — dieselben Aufrufe wie der
+Reiter „Dateien" der Modellakte.
+
 Grenzen:
 
-* Nur beim **Anlegen**. An eine Akte, die es in ElasPrintFlow schon gibt, hängt
-  Elas3DView nichts an — das geht dort unter „Quelldateien & Varianten".
+* Die Suche zeigt höchstens 20 Treffer; bei mehr hilft ein genaueres Suchwort.
+* Ein Doppel erkennt Elas3DView von selbst nur am **Namen**. Dasselbe Modell
+  unter anderem Namen findet nur, wer sucht und die Bilder vergleicht.
 * Die Hauptdatei ist immer das geöffnete Modell. Soll es eine andere sein:
   dieses Modell öffnen, das bisherige anhaken. Nachträglich lässt sie sich in
   der Modellakte wechseln.
@@ -266,9 +302,9 @@ Grenzen:
 * Höchstens 300 MB je Datei — mehr nimmt ElasPrintFlow in einem Stück nicht an.
 * Ein schon vorhandenes JPG neben dem Modell wird nicht mit hochgeladen; das
   Titelbild entsteht bei der Übernahme neu. Gelöscht wird das JPG trotzdem mit.
-* Gibt es den Namen in der Kategorie schon, wird vor dem Hochladen abgelehnt.
-  Groß- und Kleinschreibung zählen dabei nicht: auf der Freigabe wäre es
-  derselbe Ordner.
+* Gibt es den Namen in der Kategorie schon, wird vor dem Hochladen gefragt:
+  anhängen oder anderer Name. Groß- und Kleinschreibung zählen dabei nicht —
+  auf der Freigabe wäre es derselbe Ordner.
 
 ### Design
 

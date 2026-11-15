@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -272,6 +273,12 @@ namespace Elas3DView
         /// <summary>Der Nutzer will Server oder Benutzer wechseln, statt zu übernehmen.</summary>
         public bool ChangeConnection;
 
+        /// <summary>
+        /// Der Nutzer will kein neues Modell anlegen, sondern in den vorhandenen
+        /// suchen und die Datei an eine bestehende Akte anhängen.
+        /// </summary>
+        public bool SearchExisting;
+
         /// <param name="marks">Auswahl der Wasserzeichen; Eintrag 0 heißt „ohne".</param>
         /// <param name="render">Zeichnet das Titelbild mit dem Wasserzeichen dieses Eintrags neu.</param>
         /// <param name="fileRows">
@@ -357,6 +364,18 @@ namespace Elas3DView
             conn.Click += delegate { Keep(); ChangeConnection = true; DialogResult = false; };
             DockPanel.SetDock(conn, Dock.Left);
             foot.Children.Add(conn);
+
+            // Gibt es das Modell dort vielleicht schon — unter anderem Namen? Dann
+            // gehört die Datei in seine Akte, nicht in eine neue.
+            Button existing = new Button();
+            existing.Content = "An bestehende Akte …";
+            existing.Style = (Style)Application.Current.Resources["BtnChip"];
+            existing.VerticalAlignment = VerticalAlignment.Center;
+            existing.ToolTip = "In den Modellen von ElasPrintFlow suchen, mit Bild vergleichen und\n" +
+                               "die Datei an eine vorhandene Akte anhängen — statt ein neues Modell anzulegen";
+            existing.Click += delegate { Keep(); SearchExisting = true; DialogResult = false; };
+            DockPanel.SetDock(existing, Dock.Left);
+            foot.Children.Add(existing);
 
             Button ok = MakeButton("Übernehmen", true);
             ok.IsDefault = true;
@@ -510,6 +529,446 @@ namespace Elas3DView
     }
 
     /// <summary>
+    /// In den Modellen von ElasPrintFlow suchen und eines wählen, an dessen Akte
+    /// die Datei geht (Tristan, 15.11.2026: „in den Modellen suchen, dort ein Bild
+    /// anzeigen und dann die Chance haben, das Modell dem gewählten hinzuzufügen").
+    ///
+    /// Oben stehen zwei Bilder nebeneinander — links das eigene, rechts das der
+    /// gewählten Akte. Ob es dasselbe Modell ist, sagt kein Name; man sieht es.
+    ///
+    /// Derselbe Dialog fängt auch den vergebenen Namen ab: Dann steht die Akte
+    /// dieses Namens schon gewählt da, und der Weg zurück heißt „Anderer Name".
+    ///
+    /// Die Eingabetaste sucht. Angehängt wird nur mit dem Knopf oder einem
+    /// Doppelklick auf den Treffer — nie nebenbei.
+    /// </summary>
+    public class PrintFlowSearchDialog : PanelDialog
+    {
+        private readonly Func<string, CancellationToken, Task<PrintFlowSearch>> _search;
+        private readonly Func<PrintFlowHit, CancellationToken, Task<byte[]>> _picture;
+        private readonly PrintFlowHit _preset;
+
+        private readonly TextBox _query;
+        private readonly ListBox _list;
+        private readonly Image _theirs;
+        private readonly TextBlock _theirsInfo, _theirsEmpty, _state;
+        private readonly Button _ok;
+
+        private readonly Dictionary<int, BitmapSource> _pictures = new Dictionary<int, BitmapSource>();
+        private readonly Dictionary<int, Image> _thumbs = new Dictionary<int, Image>();
+        private CancellationTokenSource _cts;
+        private bool _closed;
+
+        /// <summary>Die Akte, an die angehängt werden soll; null, solange der Nutzer zurück will.</summary>
+        public PrintFlowHit Chosen;
+
+        /// <param name="mine">Das eigene Modell, so wie es gerade in der Ansicht steht.</param>
+        /// <param name="backText">Wie der Weg zurück heißt: „Zurück" oder „Anderer Name".</param>
+        /// <param name="preset">Eine Akte, die schon feststeht (der vergebene Name); sonst null.</param>
+        public PrintFlowSearchDialog(string caption, string query, BitmapSource mine, string mineInfo,
+                                     string backText, PrintFlowHit preset,
+                                     Func<string, CancellationToken, Task<PrintFlowSearch>> search,
+                                     Func<PrintFlowHit, CancellationToken, Task<byte[]>> picture)
+            : base("An bestehende Akte anhängen", caption, 800)
+        {
+            _search = search;
+            _picture = picture;
+            _preset = preset;
+
+            // ---- hier und dort ----
+            Grid pair = new Grid();
+            pair.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            pair.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
+            pair.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            Image own;
+            TextBlock ownInfo, ownEmpty;
+            pair.Children.Add(Side("HIER", out own, out ownInfo, out ownEmpty));
+            own.Source = mine;
+            ownInfo.Text = mineInfo ?? "";
+
+            FrameworkElement right = Side("IN ELASPRINTFLOW", out _theirs, out _theirsInfo, out _theirsEmpty);
+            Grid.SetColumn(right, 2);
+            pair.Children.Add(right);
+            Root.Children.Add(pair);
+
+            // ---- Suche ----
+            DockPanel ask = new DockPanel();
+            ask.Margin = new Thickness(0, 14, 0, 6);
+
+            Button go = MakeButton("Suchen", false);
+            go.MinWidth = 92;
+            go.Margin = new Thickness(8, 0, 0, 0);
+            go.Click += delegate { RunSearch(false); };
+            DockPanel.SetDock(go, Dock.Right);
+            ask.Children.Add(go);
+
+            _query = new TextBox();
+            _query.Text = query ?? "";
+            _query.Style = (Style)Application.Current.Resources["Txt"];
+            _query.ToolTip = "Name oder Artikelnummer — ein Teil genügt";
+            Fit(_query);
+            _query.KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.Key != Key.Enter) return;
+                RunSearch(false);
+                e.Handled = true;
+            };
+            ask.Children.Add(_query);
+            Root.Children.Add(ask);
+
+            _state = new TextBlock();
+            _state.FontSize = 11.5;
+            _state.Margin = new Thickness(2, 0, 0, 6);
+            _state.SetResourceReference(TextBlock.ForegroundProperty, "TextWeak");
+            Root.Children.Add(_state);
+
+            // ---- Treffer ----
+            _list = new ListBox();
+            _list.Style = (Style)Application.Current.Resources["List"];
+            _list.Height = 250;         // vier Treffer ohne Blättern
+            _list.SelectionChanged += delegate { ShowSelected(); };
+            _list.MouseDoubleClick += delegate(object s, MouseButtonEventArgs e)
+            {
+                // Nur der Doppelklick AUF einen Treffer — nicht der auf die Bildlaufleiste.
+                DependencyObject d = e.OriginalSource as DependencyObject;
+                while (d is Visual && !(d is ListBoxItem) && !(d is ListBox))
+                    d = VisualTreeHelper.GetParent(d);
+                if (d is ListBoxItem) Accept();
+            };
+
+            Border box = new Border();
+            box.CornerRadius = new CornerRadius(9);
+            box.BorderThickness = new Thickness(1);
+            box.Padding = new Thickness(4);
+            box.SetResourceReference(Border.BackgroundProperty, "Bg");
+            box.SetResourceReference(Border.BorderBrushProperty, "Border");
+            box.Child = _list;
+            Root.Children.Add(box);
+
+            Root.Children.Add(Hint);
+
+            // ---- Fußzeile ----
+            DockPanel foot = new DockPanel();
+            foot.Margin = new Thickness(0, 16, 0, 0);
+            foot.LastChildFill = false;
+
+            TextBlock note = new TextBlock();
+            note.Text = "Die Datei liegt danach im Ordner der Akte — ohne eigene Artikelnummer.\n" +
+                        "Titelbild, Name und Hauptdatei der Akte bleiben, wie sie sind.";
+            note.FontSize = 11.5;
+            note.VerticalAlignment = VerticalAlignment.Center;
+            note.SetResourceReference(TextBlock.ForegroundProperty, "TextWeak");
+            DockPanel.SetDock(note, Dock.Left);
+            foot.Children.Add(note);
+
+            _ok = MakeButton("Diesem Modell hinzufügen", true);
+            _ok.IsEnabled = false;
+            _ok.Click += delegate { Accept(); };
+            DockPanel.SetDock(_ok, Dock.Right);
+            foot.Children.Add(_ok);
+
+            Button back = MakeButton(backText, false);
+            back.IsCancel = true;
+            DockPanel.SetDock(back, Dock.Right);
+            foot.Children.Add(back);
+            Root.Children.Add(foot);
+
+            ShowSelected();
+
+            Loaded += delegate
+            {
+                _query.Focus();
+                _query.SelectAll();
+                if (_preset != null) ShowPreset();
+                else RunSearch(true);
+            };
+            Closed += delegate
+            {
+                _closed = true;
+                if (_cts != null) _cts.Cancel();
+            };
+        }
+
+        /// <summary>Eine Bildfläche mit Überschrift und einer Zeile darunter.</summary>
+        private static FrameworkElement Side(string label, out Image image, out TextBlock info, out TextBlock empty)
+        {
+            StackPanel side = new StackPanel();
+
+            TextBlock head = new TextBlock();
+            head.Text = label;
+            head.FontSize = 10.5;
+            head.FontWeight = FontWeights.SemiBold;
+            head.Margin = new Thickness(2, 0, 0, 6);
+            head.SetResourceReference(TextBlock.ForegroundProperty, "GoldText");
+            side.Children.Add(head);
+
+            Border frame = new Border();
+            frame.CornerRadius = new CornerRadius(9);
+            frame.BorderThickness = new Thickness(1);
+            frame.Height = 186;
+            frame.Padding = new Thickness(6);
+            frame.SetResourceReference(Border.BackgroundProperty, "Bg");
+            frame.SetResourceReference(Border.BorderBrushProperty, "Border");
+
+            Grid inner = new Grid();
+            image = new Image();
+            image.Stretch = Stretch.Uniform;
+            RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
+            inner.Children.Add(image);
+
+            empty = new TextBlock();
+            empty.FontSize = 12;
+            empty.HorizontalAlignment = HorizontalAlignment.Center;
+            empty.VerticalAlignment = VerticalAlignment.Center;
+            empty.SetResourceReference(TextBlock.ForegroundProperty, "TextWeak");
+            inner.Children.Add(empty);
+
+            frame.Child = inner;
+            side.Children.Add(frame);
+
+            info = new TextBlock();
+            info.FontSize = 12;
+            info.Margin = new Thickness(2, 6, 0, 0);
+            info.TextTrimming = TextTrimming.CharacterEllipsis;
+            info.SetResourceReference(TextBlock.ForegroundProperty, "TextMuted");
+            side.Children.Add(info);
+            return side;
+        }
+
+        private PrintFlowHit Selected()
+        {
+            ListBoxItem item = _list.SelectedItem as ListBoxItem;
+            return item == null ? null : item.Tag as PrintFlowHit;
+        }
+
+        /// <summary>Zeigt rechts oben, was in der Liste gewählt ist.</summary>
+        private void ShowSelected()
+        {
+            PrintFlowHit hit = Selected();
+            _ok.IsEnabled = hit != null;
+            if (hit == null)
+            {
+                _theirs.Source = null;
+                _theirsInfo.Text = "";
+                _theirsEmpty.Text = "Einen Treffer wählen";
+                return;
+            }
+
+            BitmapSource bmp;
+            _pictures.TryGetValue(hit.Id, out bmp);
+            _theirs.Source = bmp;
+            _theirsEmpty.Text = bmp != null ? ""
+                              : hit.PreviewPath == null ? "Diese Akte hat kein Titelbild"
+                                                        : "Bild wird geladen …";
+            _theirsInfo.Text = hit.Name + "   ·   " + Number(hit) + "   ·   " + hit.Category;
+        }
+
+        private static string Number(PrintFlowHit hit)
+        {
+            return string.IsNullOrEmpty(hit.ArticleNumber) ? "ohne Artikelnummer" : hit.ArticleNumber;
+        }
+
+        private ListBoxItem RowFor(PrintFlowHit hit)
+        {
+            DockPanel row = new DockPanel();
+
+            Border frame = new Border();
+            frame.Width = 62;
+            frame.Height = 46;
+            frame.CornerRadius = new CornerRadius(6);
+            frame.Margin = new Thickness(0, 0, 12, 0);
+            frame.SetResourceReference(Border.BackgroundProperty, "Panel");
+            Image thumb = new Image();
+            thumb.Stretch = Stretch.Uniform;
+            thumb.Margin = new Thickness(2);
+            RenderOptions.SetBitmapScalingMode(thumb, BitmapScalingMode.HighQuality);
+            BitmapSource known;
+            if (_pictures.TryGetValue(hit.Id, out known)) thumb.Source = known;
+            frame.Child = thumb;
+            _thumbs[hit.Id] = thumb;
+            DockPanel.SetDock(frame, Dock.Left);
+            row.Children.Add(frame);
+
+            StackPanel words = new StackPanel();
+            words.VerticalAlignment = VerticalAlignment.Center;
+
+            TextBlock name = new TextBlock();       // ohne eigene Farbe: Die Zeile färbt, was gewählt ist
+            name.Text = hit.Name;
+            name.FontSize = 13.5;
+            name.TextTrimming = TextTrimming.CharacterEllipsis;
+            words.Children.Add(name);
+
+            TextBlock sub = new TextBlock();
+            sub.Text = Number(hit) + "   ·   " + hit.Category;
+            sub.FontSize = 11.5;
+            sub.FontWeight = FontWeights.Normal;
+            sub.Margin = new Thickness(0, 2, 0, 0);
+            sub.SetResourceReference(TextBlock.ForegroundProperty, "TextMuted");
+            words.Children.Add(sub);
+            row.Children.Add(words);
+
+            ListBoxItem item = new ListBoxItem();
+            item.Style = (Style)Application.Current.Resources["ListItem"];
+            item.Content = row;
+            item.Tag = hit;
+            item.ToolTip = hit.Name;
+            return item;
+        }
+
+        private void Fill(List<PrintFlowHit> hits, bool more)
+        {
+            _list.Items.Clear();
+            _thumbs.Clear();
+            foreach (PrintFlowHit h in hits) _list.Items.Add(RowFor(h));
+
+            _state.Text = hits.Count == 0
+                ? "Nichts gefunden."
+                : (hits.Count == 1 ? "1 Treffer" : hits.Count + " Treffer") +
+                  (more ? "   ·   ElasPrintFlow zeigt höchstens " + PrintFlowClient.SearchLimit +
+                          " — das Suchwort genauer fassen" : "");
+            if (hits.Count > 0) _list.SelectedIndex = 0;
+            ShowSelected();
+        }
+
+        /// <summary>Der vergebene Name: Die Akte steht fest und ist schon gewählt.</summary>
+        private async void ShowPreset()
+        {
+            List<PrintFlowHit> one = new List<PrintFlowHit>();
+            one.Add(_preset);
+            Fill(one, false);
+            _state.Text = "Die Akte mit diesem Namen — oder nach einer anderen suchen";
+
+            CancellationTokenSource mine = new CancellationTokenSource();
+            _cts = mine;
+            await LoadPictures(one, mine);
+        }
+
+        private async void RunSearch(bool first)
+        {
+            string q = _query.Text.Trim();
+            Hint.Text = "";
+            if (q.Length < 2)
+            {
+                _state.Text = "Bitte mindestens zwei Zeichen eingeben.";
+                return;
+            }
+
+            if (_cts != null) _cts.Cancel();
+            CancellationTokenSource mine = new CancellationTokenSource();
+            _cts = mine;
+            _state.Text = "Suche …";
+
+            PrintFlowSearch found = null;
+            string problem = null, shorter = null;
+            try
+            {
+                found = await _search(q, mine.Token);
+
+                // Der ganze Dateiname trifft selten einen Modellnamen. Beim ersten
+                // Öffnen deshalb noch ein Versuch mit dem ersten Wort — der Nutzer
+                // soll Kandidaten sehen, nicht erst tippen müssen.
+                if (first && found.Hits.Count == 0)
+                {
+                    shorter = FirstWord(q);
+                    if (shorter != null)
+                    {
+                        PrintFlowSearch wider = await _search(shorter, mine.Token);
+                        if (wider.Hits.Count > 0) found = wider;
+                        else shorter = null;
+                    }
+                }
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex) { problem = ex.Message; }
+
+            if (_closed || _cts != mine) return;
+            if (problem != null)
+            {
+                _state.Text = "";
+                Hint.Text = problem;
+                return;
+            }
+            if (shorter != null) _query.Text = shorter;
+
+            Fill(found.Hits, found.More);
+            await LoadPictures(found.Hits, mine);
+        }
+
+        /// <summary>Das erste Wort eines Namens, wenn es zum Suchen taugt und nicht schon alles ist.</summary>
+        private static string FirstWord(string name)
+        {
+            string[] parts = name.Split(new char[] { ' ', '_', '-', '.', '(' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 || parts[0].Length < 3) return null;
+            return parts[0];
+        }
+
+        /// <summary>
+        /// Holt die Titelbilder der Treffer nach, eines nach dem anderen. Die Liste
+        /// steht schon da; ein Bild, das nicht kommt, fehlt eben.
+        /// </summary>
+        private async Task LoadPictures(List<PrintFlowHit> hits, CancellationTokenSource mine)
+        {
+            foreach (PrintFlowHit hit in hits)
+            {
+                if (hit.PreviewPath == null || _pictures.ContainsKey(hit.Id)) continue;
+
+                byte[] data = null;
+                try { data = await _picture(hit, mine.Token); }
+                catch (OperationCanceledException) { return; }
+                catch (Exception) { data = null; }
+                if (_closed || _cts != mine) return;
+
+                BitmapSource bmp = Decode(data);
+                if (bmp == null)
+                {
+                    // Kein Bild zu bekommen: nicht ewig „wird geladen" stehen lassen.
+                    hit.PreviewPath = null;
+                    if (Selected() == hit) ShowSelected();
+                    continue;
+                }
+                _pictures[hit.Id] = bmp;
+                Image thumb;
+                if (_thumbs.TryGetValue(hit.Id, out thumb)) thumb.Source = bmp;
+                if (Selected() == hit) ShowSelected();
+            }
+        }
+
+        private static BitmapSource Decode(byte[] data)
+        {
+            if (data == null || data.Length == 0) return null;
+            try
+            {
+                BitmapImage img = new BitmapImage();
+                img.BeginInit();
+                img.CacheOption = BitmapCacheOption.OnLoad;
+                img.DecodePixelWidth = 760;         // Titelbilder sind bis 1920 px breit; hier reicht die Fläche
+                img.StreamSource = new MemoryStream(data);
+                img.EndInit();
+                img.Freeze();
+                return img;
+            }
+            catch { return null; }
+        }
+
+        private void Accept()
+        {
+            PrintFlowHit hit = Selected();
+            if (hit == null) return;
+            Chosen = hit;
+            DialogResult = true;
+        }
+
+        /// <summary>Für die Prüfung ohne Bildschirm: Treffer und Bilder, als hätte ElasPrintFlow geantwortet.</summary>
+        internal void ProbeFill(List<PrintFlowHit> hits, BitmapSource sample, bool more)
+        {
+            foreach (PrintFlowHit h in hits)
+                if (h.PreviewPath != null) _pictures[h.Id] = sample;
+            Fill(hits, more);
+        }
+    }
+
+    /// <summary>
     /// Prüfung ohne Bildschirm, wie /vorschau im Setup:
     ///
     ///     Elas3DView.exe /dialogbilder Modelldatei Zielordner
@@ -580,6 +1039,66 @@ namespace Elas3DView
                     MainWindow.DeleteTitle, MainWindow.DeleteQuestion(model, victims),
                     MainWindow.DeleteYes, MainWindow.DeleteNo, true,
                     MainWindow.TransferLinks(model, PrintFlowClient.DefaultUrl));
+
+                // An eine bestehende Akte anhängen: die Suche mit Treffern und Bild,
+                // der vergebene Name, und die Rückfrage danach.
+                List<PrintFlowHit> hits = new List<PrintFlowHit>();
+                string[][] sample =
+                {
+                    new string[] { stem, "Vasen", "VA-0000024", "bild" },
+                    new string[] { stem + " klein", "Vasen", "VA-0000031", "bild" },
+                    new string[] { stem + " mit Deckel", "Dekoration", "DE-0000112", null },
+                    new string[] { "Übertopf " + stem, "Vasen", "VA-0000007", "bild" },
+                    new string[] { stem + " Set", "Sonstiges", "", "bild" }
+                };
+                for (int i = 0; i < sample.Length; i++)
+                {
+                    PrintFlowHit h = new PrintFlowHit();
+                    h.Id = 9000 + i;
+                    h.Name = sample[i][0];
+                    h.Category = sample[i][1];
+                    h.ArticleNumber = sample[i][2];
+                    h.PreviewPath = sample[i][3];
+                    hits.Add(h);
+                }
+                PrintFlowSearchDialog find = new PrintFlowSearchDialog(
+                    file + "  ·  1,7 MB   —   in ElasPrintFlow nachsehen, ob es das Modell schon gibt, und dort anhängen.",
+                    stem, picture, file, "Zurück", null, null, null);
+                find.ProbeFill(hits, picture, false);
+                find.SavePicture(Path.Combine(dir, "3c-anhaengen-suche.png"), null);
+
+                PrintFlowSearchDialog taken = new PrintFlowSearchDialog(
+                    "„" + stem + "“ gibt es in der Kategorie „Vasen“ schon. An diese Akte anhängen — oder zurück " +
+                    "und dem neuen Modell einen anderen Namen geben.",
+                    stem, picture, file, "Anderer Name", hits[0], null, null);
+                taken.ProbeFill(hits.GetRange(0, 1), picture, false);
+                taken.SavePicture(Path.Combine(dir, "3d-anhaengen-name-vergeben.png"), null);
+
+                PrintFlowModel joined = new PrintFlowModel();
+                joined.Attached = true;
+                joined.Id = 2743;
+                joined.Name = stem;
+                joined.Category = "Vasen";
+                joined.ArticleNumber = "VA-0000024";
+                joined.NasPath = model.NasPath;
+                joined.ExtraNames.Add(stem + " (2).stl");
+                joined.ExtraNames.Add(stem + " ohne Boden.stl");
+                joined.AlreadyThere.Add(stem + " (1).3mf");
+                List<string> gone = new List<string>();
+                gone.Add(file);
+                gone.Add(stem + ".jpg");
+                gone.Add(stem + " ohne Boden.stl");
+                gone.Add(stem + " (1).3mf");
+                AppDialog.SavePicture(Path.Combine(dir, "4c-loeschfrage-angehaengt.png"), DlgKind.Success,
+                    MainWindow.AttachedTitle, MainWindow.DeleteQuestion(joined, gone),
+                    MainWindow.DeleteYes, MainWindow.DeleteNo, true,
+                    MainWindow.TransferLinks(joined, PrintFlowClient.DefaultUrl));
+
+                joined.ExtraNames.Clear();
+                AppDialog.SavePicture(Path.Combine(dir, "4d-loeschfrage-lag-schon-dort.png"), DlgKind.Success,
+                    MainWindow.AlreadyThereTitle, MainWindow.DeleteQuestion(joined, gone.GetRange(3, 1)),
+                    MainWindow.DeleteYes, MainWindow.DeleteNo, true,
+                    MainWindow.TransferLinks(joined, PrintFlowClient.DefaultUrl));
 
                 new ReleaseNotesDialog().SavePicture(Path.Combine(dir, "7-neuerungen.png"), null);
 

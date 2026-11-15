@@ -49,11 +49,24 @@ namespace Elas3DView
     /// </summary>
     public static class AppVersion
     {
-        public const string Current = "1.5.0";
+        public const string Current = "1.6.0";
 
         /// <summary>Neueste zuerst. Der erste Eintrag gehört zu <see cref="Current"/>.</summary>
         public static readonly ReleaseNote[] Notes =
         {
+            new ReleaseNote("1.6.0", "15.11.2026",
+                "Neu: an eine BESTEHENDE Modellakte anhängen. Im Übernahme-Fenster führt „An bestehende " +
+                    "Akte …“ in die Suche: Name oder Artikelnummer eingeben, Treffer mit Bild ansehen, " +
+                    "„Diesem Modell hinzufügen“.",
+                "Links steht das eigene Modell, rechts das Titelbild der gewählten Akte — ob es dasselbe " +
+                    "ist, sieht man, bevor man entscheidet.",
+                "Gibt es den Namen in der Kategorie schon, kommt statt der Absage dieselbe Wahl: an die " +
+                    "Akte anhängen oder zurück und einen anderen Namen geben.",
+                "Angehängte Dateien liegen im Ordner der Akte, mit eigenem Vorschaubild und ohne " +
+                    "Artikelnummer — wie die angehakten. Angehakte Dateien gehen mit.",
+                "Liegt dort schon dieselbe Datei, wird sie nicht noch einmal hochgeladen. Eine andere " +
+                    "gleichen Namens kommt als „Name (2)“ dazu; überschrieben wird nichts."),
+
             new ReleaseNote("1.5.0", "14.11.2026",
                 "Neu: „Aktualisieren“ über der Dateiliste (auch F5) liest den Ordner neu ein — was " +
                     "inzwischen dazugekommen oder verschwunden ist, steht danach in der Liste.",
